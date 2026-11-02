@@ -1,0 +1,2 @@
+import "stand_in.ab"
+fun main: int = atStandInMain()

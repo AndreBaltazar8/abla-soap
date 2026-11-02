@@ -1,0 +1,284 @@
+// Local AT stand-in shared with NovaKind. Mutual TLS; OpenSSL independently opens the WS-Security token.
+// FOLDER PORT [soap]: PORT=0 chooses a free port; writes FOLDER/port and FOLDER/ready. `soap` keeps the library's
+// strict generated-client fixture (username, certificate subject, schema and fixed answers). Otherwise models series and transport.
+import github("AndreBaltazar8/abla-xml")
+import "abla/unsafe/memory"
+import "abla/unsafe/memory/raw"
+import "abla/tls/hosted"
+import "abla/process"
+import "abla/fs"
+import "abla/json"
+import "abla/crypto"
+import "abla/text"
+
+var folder = Path("")
+var library = false
+val series: Map<string, Json> = Map()
+val documents: Map<string, string> = Map()
+val sec = "http://schemas.xmlsoap.org/ws/2002/12/secext"
+val soap = "http://schemas.xmlsoap.org/soap/envelope/"
+class Answer(val status: int, val text: string)
+fun envelope(body: string): string = "<S:Envelope xmlns:S=\"$soap\"><S:Body>$body</S:Body></S:Envelope>"
+fun escaped(text: string): string = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+fun fault(message: string, status: int = 500): Answer = Answer(status, envelope("<S:Fault><faultcode>S:Client</faultcode><faultstring>${escaped(message)}</faultstring></S:Fault>"))
+fun field(value: Json, name: string): string = value.getString(name)
+fun logged(value: Json): void {
+    val log = folder.child("log.jsonl")
+    log.writeText((if (log.exists()) log.readText() else "") + jsonStringify(value) + "\n")
+    return
+}
+fun run(arguments: array<string>): string {
+    val c = command(arguments[0])
+    var i = 1
+    while (i < arguments.size) { c.argument(arguments[i]); i = i + 1 }
+    val r = c.errors("/dev/null").capture()
+    if (r.status == 0) r.output else ""
+}
+fun now(): string = run(["date", "+%Y-%m-%dT%H:%M:%S"]).trim()
+fun toInt(text: string): int {
+    var value = 0
+    var index = if (text.startsWith("-")) 1 else 0
+    while (index < text.size) {
+        if (text[index] < 48 || text[index] > 57) return 0
+        value = value * 10 + text[index] - 48
+        index = index + 1
+    }
+    if (text.startsWith("-")) -value else value
+}
+fun seconds(value: string): int = toInt(run(["date", "-d", value, "+%s"]).trim())
+fun decrypt(token: XmlElement): array<string> {
+    val nonce = folder.child("nonce.bin")
+    nonce.writeText(base64Decode(token.childText("Nonce", sec)))
+    val key = run(["openssl", "pkeyutl", "-decrypt", "-inkey", folder.child("at.key").text, "-in", nonce.text, "-pkeyopt", "rsa_padding_mode:pkcs1"])
+    nonce.remove()
+    if (key.size != 16) return []
+    val opened: array<string> = []
+    for (name in ["Password", "Created"]) {
+        val input = folder.child("encrypted.bin")
+        input.writeText(base64Decode(token.childText(name, sec)))
+        opened.append(run(["openssl", "enc", "-d", "-aes-128-ecb", "-K", hexEncode(key), "-in", input.text]))
+        input.remove()
+    }
+    opened
+}
+fun flat(element: XmlElement): Json {
+    val keys: array<string> = []
+    val values: array<Json> = []
+    for (child in element.elements()) {
+        keys.append(child.localName)
+        values.append(if (child.elements().size > 0) flat(child) else jsonString(child.text()))
+    }
+    jsonObject(keys, values)
+}
+fun with(value: Json, names: array<string>, values: array<string>): Json {
+    val keys: array<string> = []
+    val items: array<Json> = []
+    for (key in value.keys) {
+        var replaced = false
+        for (name in names) if (name == key) replaced = true
+        if (!replaced) { keys.append(key); items.append(value.get(key)) }
+    }
+    var i = 0
+    while (i < names.size) { keys.append(names[i]); items.append(jsonString(values[i])); i = i + 1 }
+    jsonObject(keys, items)
+}
+fun info(entry: Json): string {
+    var out = "<infoSerie>"
+    for (key in ["serie", "tipoSerie", "classeDoc", "tipoDoc", "numInicialSeq", "seqUltimoDocEmitido", "dataInicioPrevUtiliz", "meioProcessamento", "numCertSWFatur", "codValidacaoSerie", "dataRegisto", "estado", "dataEstado", "nifComunicou"]) {
+        if (!entry.get(key).isNull()) out = "$out<$key>${escaped(field(entry, key))}</$key>"
+    }
+    "$out</infoSerie>"
+}
+fun answer(operation: string, code: int, message: string, entries: string = ""): Answer = Answer(200, envelope("<ns2:${operation}Response xmlns:ns2=\"http://at.gov.pt/\"><${operation}Resp>$entries<infoResultOper><codResultOper>$code</codResultOper><msgResultOper>${escaped(message)}</msgResultOper></infoResultOper></${operation}Resp></ns2:${operation}Response>"))
+fun codeFor(name: string, kind: string): string {
+    val alphabet = "BCDFGHJKLMNPQRSTVWXZ23456789"
+    val digest = sha256("${name.uppercase()}/$kind")
+    var result = "AA"
+    var i = 0
+    while (i < 6) { val at = digest[i] % alphabet.size; result = result + alphabet.slice(at, at + 1); i = i + 1 }
+    result
+}
+fun handle(request: XmlElement, username: string): Answer {
+    val operation = request.localName
+    val asked = flat(request)
+    logged($json {"operation": operation, "username": username, "fields": asked})
+    val name = field(asked, "serie")
+    val kind = field(asked, "tipoDoc")
+    val klass = field(asked, "classeDoc")
+    val key = "${name.uppercase()}/$klass/$kind"
+    val moment = now()
+    if (operation == "registarSerie") {
+        if (library) {
+            if (request.child("serie", "") == null || field(asked, "numCertSWFatur") != "9999") return fault("unqualified children, as the schema says")
+            if (kind == "XX") return answer(operation, 4046, "Tipo inválido")
+            val fixed = with(asked, ["codValidacaoSerie", "dataRegisto", "estado", "dataEstado", "nifComunicou"], ["AAJFJ3K5", "2026-11-02", "A", "2026-11-02T10:00:00", "599999993"])
+            return answer(operation, 2001, "Registada", info(fixed))
+        }
+        if (name.startsWith("DUP") || series.has(key)) return answer(operation, 4001, "Não foi possível registar a Série. A Série $name indicada para o tipo de documento $kind já foi registada.")
+        if (name.startsWith("BAD")) return answer(operation, 4003, "Não foi possível registar a Série. Por favor corrija os erros nos campos assinalados. [serie]")
+        if (name.startsWith("TECH")) return answer(operation, 5000, "Erro técnico não especificado.")
+        if (name.startsWith("SLOW")) sleep(6000)
+        val code = codeFor(name, kind)
+        val entry = with(asked, ["codValidacaoSerie", "dataRegisto", "estado", "dataEstado", "nifComunicou"], [code, moment.slice(0, 10), "A", moment, username.split("/")[0]])
+        series.set(key, entry)
+        if (name.startsWith("LOST")) return Answer(0, "")
+        return answer(operation, 2001, "Série registada com sucesso. Ficou na situação ativa e foi atribuído o seguinte código de validação: $code", info(entry))
+    }
+    if (operation == "consultarSeries") {
+        var entries = ""
+        for (k in series.keys()) {
+            val e = series.get(k) ?? jsonNull()
+            if ((name == "" || field(e, "serie").uppercase() == name.uppercase()) && (kind == "" || field(e, "tipoDoc") == kind) && (klass == "" || field(e, "classeDoc") == klass)) entries = entries + info(e)
+        }
+        return answer(operation, 2002, if (entries != "") "Pesquisa efetuada com sucesso." else "Pesquisa efetuada com sucesso. Não existem resultados para os filtros selecionados.", entries)
+    }
+    val entry = series.get(key) ?? jsonNull()
+    if (operation == "finalizarSerie") {
+        if (entry.isNull() || field(entry, "estado") != "A" || field(entry, "codValidacaoSerie") != field(asked, "codValidacaoSerie")) return answer(operation, 4005, "Não foi possível finalizar a Série. A Série não está ativa.")
+        if (toInt(field(asked, "seqUltimoDocEmitido")) < 1) return answer(operation, 4047, "O valor indicado no último documento emitido deve ser superior ao indicado no início da sequência.")
+        val updated = with(entry, ["estado", "dataEstado", "seqUltimoDocEmitido"], ["F", moment, field(asked, "seqUltimoDocEmitido")])
+        series.set(key, updated)
+        return answer(operation, 2004, "Série finalizada com sucesso.", info(updated))
+    }
+    if (operation == "anularSerie") {
+        if (field(asked, "motivo") != "ER") return answer(operation, 4051, "O valor indicado no motivo de anulação deve corresponder a um valor pré-definido.")
+        if (entry.isNull() || field(entry, "estado") != "A" || field(asked, "declaracaoNaoEmissao") != "true") return answer(operation, 4004, "Não foi possível anular a Série. A Série não está ativa.")
+        val updated = with(entry, ["estado", "dataEstado"], ["N", moment])
+        series.set(key, updated)
+        return answer(operation, 2003, "Série anulada com sucesso.", info(updated))
+    }
+    fault("what's $operation?")
+}
+fun transportReply(number: string, code: string, message: string, atCode: string = ""): Answer {
+    val extra = if (code == "0" || code == "-100") "<DocumentNumber>${escaped(number)}</DocumentNumber><ATDocCodeID>$atCode</ATDocCodeID>" else ""
+    Answer(200, envelope("<n:envioDocumentoTransporteResponseElem xmlns:n=\"https://servicos.portaldasfinancas.gov.pt/sgdtws/documentosTransporte/\"><ResponseStatus><ReturnCode>$code</ReturnCode><ReturnMessage>${escaped(message)}</ReturnMessage></ResponseStatus>$extra</n:envioDocumentoTransporteResponseElem>"))
+}
+fun transport(request: XmlElement, username: string): Answer {
+    val lines: array<Json> = []
+    for (line in request.elements("Line", "")) lines.append(flat(line))
+    val values = flat(request)
+    val keys = values.keys
+    val items: array<Json> = []
+    for (key in keys) items.append(values.get(key))
+    // Replace the single Line flat() saw with all lines.
+    var i = 0
+    while (i < keys.size) { if (keys[i] == "Line") items[i] = jsonArray(lines); i = i + 1 }
+    val asked = jsonObject(keys, items)
+    logged($json {"operation": request.localName, "username": username, "fields": asked})
+    val number = field(asked, "DocumentNumber")
+    if (library) return if (number == "GT A/1") transportReply(number, "0", "OK", "123") else fault("the document number")
+    if (number.contains("TECH")) return transportReply(number, "-99", "Erro interno")
+    for (name in ["TaxRegistrationNumber", "DocumentNumber", "MovementDate", "MovementType", "MovementStartTime"]) if (field(asked, name) == "") return transportReply(number, "-1", "Parâmetro de entrada inválido: $name")
+    for (place in ["CompanyAddress", "AddressFrom"]) for (name in ["Addressdetail", "City", "PostalCode", "Country"]) if (field(asked.get(place), name) == "") return transportReply(number, "-1", "Parâmetro de entrada inválido: $place")
+    if (field(asked, "MovementStatus") == "A") {
+        if (!documents.has(number)) return transportReply(number, "-5", "Estado de Documento de Transporte inválido")
+        documents.set(number, "A")
+        return transportReply(number, "0", "Documento registado com sucesso.")
+    }
+    if (documents.has(number)) return transportReply(number, "-3", "Já foi inserido um Documento de Transporte com o número $number")
+    documents.set(number, "N")
+    if (seconds(field(asked, "MovementStartTime")) < seconds(now())) return transportReply(number, "-100", "A data início de transporte é inferior à data atual, pelo que esta informação será considerada uma mera comunicação de dados à AT")
+    val digest = sha256(number)
+    var code = 0
+    for (byte in digest) code = (code * 256 + byte) % 1000000000
+    transportReply(number, "0", "Documento registado com sucesso.", "$code")
+}
+fun respond(body: string, path: string): Answer {
+    val parsed = xmlParse(body)
+    val doc = parsed.document
+    if (doc == null) return fault("the request doesn't open: XML")
+    val header = doc.root.child("Header", soap)
+    val security = if (header != null) header.child("Security", sec) else null
+    val token = if (security != null) security.child("UsernameToken", sec) else null
+    if (token == null) return fault("the request doesn't open: token")
+    val children = token.elements()
+    val order = ["Username", "Password", "Nonce", "Created"]
+    if (children.size != 4) return fault("the token isn't in the manual's order")
+    var i = 0
+    while (i < 4) { if (children[i].localName != order[i] || children[i].namespaceUri != sec) return fault("the token isn't in the manual's order"); i = i + 1 }
+    val opened = decrypt(token)
+    if (opened.size != 2) return fault("the request doesn't open: encryption")
+    val username = token.childText("Username", sec)
+    val age = seconds("now") - seconds(opened[1])
+    if (age > 300 || age < -300) return fault("Created is out of time")
+    if (opened[0] != "testes1234" || (library && username != "599999993/37")) {
+        logged($json {"operation": "refused", "username": username, "passwordRight": false})
+        return fault(if (library) "Authentication failed" else "Utilizador ou senha inválidos")
+    }
+    val soapBody = doc.root.child("Body", soap)
+    if (soapBody == null || soapBody.elements().size == 0) return fault("no body")
+    val request = soapBody.elements()[0]
+    if (path == "/documentosTransporte") transport(request, username) else handle(request, username)
+}
+// The hosted listener exposes its OpenSSL context; require a certificate under this fixture's CA at the TLS boundary.
+trusted fun requireClient(listener: TlsListener): bool {
+    val context = tlsControlPointer(listener.handle, 0)
+    if (SSL_CTX_load_verify_locations(context, folder.child("ca.crt").text, nativeNullPointer()) != 1) return false
+    SSL_CTX_set_verify(context, 3, nativeNullPointer())
+    true
+}
+trusted fun clientSubject(connection: TlsConnection): bool {
+    // Read the client certificate common name; the certificate reference is owned here.
+    val cert = SSL_get1_peer_certificate(tlsControlPointer(connection.handle, 8))
+    if (pointerIsNull(cert)) return false
+    val name = X509_get_subject_name(cert)
+    val buffer = nativeByteBuffer(256)
+    val size = X509_NAME_get_text_by_NID(name, 13, buffer.address, 256)
+    var subject = ""
+    if (size > 0) subject = buffer.adoptString(int(size)) else buffer.close()
+    X509_free(cert)
+    subject == "abla-soap-client"
+}
+trusted noescape extern:"c" fun SSL_get1_peer_certificate(ssl: i64*): i64*
+trusted noescape extern:"c" fun X509_get_subject_name(cert: i64*): i64*
+trusted noescape extern:"c" fun X509_NAME_get_text_by_NID(name: i64*, nid: i32, buffer: i64*, size: i32): i32
+trusted noescape extern:"c" fun SSL_CTX_load_verify_locations(context: i64*, file: cstring, directory: i64*): i32
+trusted noescape extern:"c" fun SSL_CTX_set_verify(context: i64*, mode: int, callback: i64*): void
+trusted noescape extern:"c" fun X509_free(cert: i64*): void
+fun serve(): int {
+    val listener = tlsListen(folder.child("server.crt").text, folder.child("server.key").text, "::1", toInt(processArgument(1)))
+    if (listener.handle < 0 || !requireClient(listener)) return 1
+    folder.child("port").writeText("${listener.localPort()}")
+    folder.child("ready").writeText("ready")
+    var stopping = false
+    while (!stopping) {
+        val connection = listener.accept()
+        if (connection.handle < 0) continue
+        var wire = ""
+        var end = -1
+        while (end < 0 && wire.size < 1048576) { val chunk = connection.read(); if (chunk == "") break; wire = wire + chunk; end = wire.indexOf("\r\n\r\n") }
+        if (end < 0) continue
+        val headers = wire.slice(0, end).split("\r\n")
+        val first = headers[0].split(" ")
+        if (first.size < 2) continue
+        val path = first[1]
+        var length = 0
+        var contentType = ""
+        var action = false
+        for (line in headers) {
+            val colon = line.indexOf(":")
+            if (colon < 0) continue
+            val name = line.slice(0, colon).lowercase()
+            val value = line.slice(colon + 1, line.size).trim()
+            if (name == "content-length") length = toInt(value)
+            if (name == "content-type") contentType = value
+            if (name == "soapaction") action = true
+        }
+        var body = wire.slice(end + 4, wire.size)
+        while (body.size < length && length <= 1048576) { val chunk = connection.read(); if (chunk == "") break; body = body + chunk }
+        val reply = if (path == "/stop") Answer(200, "")
+            else if (!contentType.contains("text/xml") || !action) fault("SOAP 1.1's headers are missing", 400)
+            else if (library && !clientSubject(connection)) fault("whose certificate is this?", 403)
+            else if (path != "/SeriesWSService" && path != "/documentosTransporte") fault("nothing at $path", 404)
+            else respond(body, path)
+        if (reply.status != 0) connection.write("HTTP/1.1 ${reply.status} Answer\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: ${reply.text.size}\r\nConnection: close\r\n\r\n${reply.text}")
+        connection.close()
+        stopping = path == "/stop"
+    }
+    0
+}
+fun atStandInMain(): int {
+    folder = Path(processArgument(0))
+    library = processArgumentCount() > 2 && processArgument(2) == "soap"
+    serve()
+}

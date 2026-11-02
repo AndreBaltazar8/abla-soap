@@ -12,3 +12,6 @@ visibility = "imports"
 "wsdl" = "src/wsdl.ab"
 "generate" = "src/generate.ab"
 "tls" = "src/tls.ab"
+
+# Local, independent AT fixture for downstream integration suites; never contacts AT.
+"testing-at" = "tests/at/stand_in.ab"

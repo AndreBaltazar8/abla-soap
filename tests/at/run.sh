@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Clients generated from AT's published WSDLs, against a local mutual-TLS server that opens the token with openssl. Never calls
-# AT. Needs python3 and openssl.
+# AT. Needs openssl.
 set -euo pipefail
 compiler=${1:-ablac}
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -33,9 +33,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/other.key" -out "$work/
 
 "$compiler" build tests/at/client.ab -o "$work/client"
 : > "$work/port"
-python3 -I tests/at/mock_at.py "$work" "$work/port" &
+"$compiler" build tests/at/server.ab -o "$work/server"
+"$work/server" "$work" 0 soap &
 server=$!
-trap 'kill "$server" 2>/dev/null || true' EXIT
+stop_server() {
+    if [[ $(readlink "/proc/$server/exe") == "$work/server" ]]; then kill "$server"; fi
+    wait "$server" 2>/dev/null || true
+}
+trap stop_server EXIT
 for _ in $(seq 100); do [[ -s $work/port ]] && break; sleep 0.1; done
 [[ -s $work/port ]] || { echo "the mock server didn't start" >&2; exit 1; }
 "$work/client" "$work" "$(cat "$work/port")"

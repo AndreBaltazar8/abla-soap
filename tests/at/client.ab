@@ -1,4 +1,4 @@
-// AT's series and transport services against tests/at/mock_at.py: clients generated from AT's WSDLs, mutual TLS and AT's token.
+// AT's series and transport services against tests/at/stand_in.ab: clients generated from AT's WSDLs, mutual TLS and AT's token.
 import "../../build/gen/at_series.ab"
 import "../../build/gen/at_transporte.ab"
 import "../../src/tls.ab"

@@ -13,13 +13,15 @@ export ABLA_PACKAGE_CACHE=$work/cache GIT_CONFIG_GLOBAL=$work/gitconfig
 fail() { printf 'subpaths: %s\n' "$1" >&2; exit 1; }
 
 listed=$(sed -n 's/^"[^"]*" = "\(.*\)"$/\1/p' "$root/abla.toml" | sort)
-found=$(cd "$root" && find src -name '*.ab' ! -name soap.ab | sort)
+found=$(cd "$root" && { find src -name '*.ab' ! -name soap.ab; echo tests/at/stand_in.ab; } | sort)
 [[ $listed == "$found" ]] || { diff <(echo "$listed") <(echo "$found") >&2 || true; fail '[exports] and src differ'; }
 
 # github() goes to a copy of what's here, committed.
 package=$work/package
 mkdir "$package"
 cp -r "$root/abla.toml" "$root/src" "$package/"
+mkdir -p "$package/tests/at"
+cp "$root/tests/at/stand_in.ab" "$package/tests/at/"
 git -C "$package" init --quiet --initial-branch=main
 git -C "$package" add -A
 git -C "$package" -c user.name=t -c user.email=t@example.invalid commit --quiet -m c
