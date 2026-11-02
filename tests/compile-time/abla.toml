@@ -1,0 +1,5 @@
+# Only this test reads files at compile time: the library itself asks for nothing, so a program using it needn't grant it.
+name = "abla-soap-compile-time-test"
+version = "0.1.0"
+entry = "generate_test.ab"
+compileCapabilities = ["filesystem.read"]

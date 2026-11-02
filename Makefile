@@ -1,6 +1,6 @@
 ABLAC_DIR ?= $(abspath ../ablac)
 COMPILER ?= ablac
-TESTS := tests/envelope_test.ab tests/client_test.ab tests/wsdl_test.ab tests/generated_test.ab
+TESTS := tests/envelope_test.ab tests/client_test.ab tests/wsdl_test.ab tests/generated_test.ab tests/compile-time/generate_test.ab
 # OpenSSL for what links it. On CI it's installed, and this is empty.
 WITH_OPENSSL ?= nix-shell $(ABLAC_DIR)/shell.nix --run
 

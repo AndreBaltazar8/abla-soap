@@ -93,11 +93,25 @@ says where.
 
 ### Why a tool
 
-`compiler.generateModule` from a transform is what was asked for first. On ablac 0.2.30 abla-xml's reader runs under the
-compile-time evaluator, and `#wsdlGenerateFrom(...)` gives the same bytes as the tool, but only with `trusted.native` granted: a
-program that imports `abla/simd` anywhere, as every client does through WS-Security's AES, is denied any `#` that calls a `.get`
-(in ablac's TODO). Granting a dependency native code to read a WSDL isn't worth it, so the tool stays until that's fixed. The
-generator takes bytes and gives bytes and calls nothing else, so it becomes one call then.
+The tool is the default: it writes a client you commit and read, and a build needs neither the WSDL nor a grant. Generating at
+compile time works too, since ablac 0.2.32: `#wsdlGenerateFrom(...)` gives the same bytes as the tool with only `filesystem.read`
+granted, also in a program that imports WS-Security (whose AES brings `abla/simd`). The project authorizes it in its `abla.toml`
+(`compileCapabilities = ["filesystem.read"]`) and the module asks for it:
+
+```abla
+import github("AndreBaltazar8/abla-soap/generate")
+import "abla/compiler"
+import "abla/fs"
+
+#compilerGrant("filesystem.read")
+
+compile fun shopClient(): string =
+    wsdlGenerateFrom(path("shop.wsdl").readText(), WsdlGenerateOptions(prefix = "Shop")).source
+```
+
+`.source` is the client's source, as the tool would write it. The WSDL must then be there at every build.
+`tests/compile-time/` checks that it matches the tool's output byte for byte. On ablac 0.2.31 and older such a `#` is denied
+`trusted.native`.
 
 ## By hand
 

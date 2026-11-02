@@ -1,0 +1,25 @@
+// `#wsdlGenerateFrom` gives the bytes `make generate` wrote with the tool, in a program that imports WS-Security, whose AES
+// brings abla/simd: the compiler reads the WSDL with filesystem.read and nothing else.
+import "../../src/generate.ab"
+import "../../src/wssecurity.ab"
+import "abla/compiler"
+import "abla/fs"
+import "abla/test"
+
+#compilerGrant("filesystem.read")
+
+compile fun shopClient(): string = wsdlGenerateFrom(path("tests/fixtures/shop.wsdl").readText(),
+    WsdlGenerateOptions(prefix = "Shop", soapImport = "\"../../src/soap.ab\"", origin = "tests/fixtures/shop.wsdl")).source
+
+compile fun hostileClient(): string = wsdlGenerateFrom(path("tests/fixtures/hostile-names.wsdl").readText(),
+    WsdlGenerateOptions(soapImport = "\"../../src/soap.ab\"", origin = "tests/fixtures/hostile-names.wsdl")).source
+
+val shop = #shopClient()
+val hostile = #hostileClient()
+
+fun main: int {
+    expect(shop.size > 0, "the shop client is generated at compile time")
+    expectEqual(shop, Path("build/gen/shop.ab").readText(), "the shop client at compile time is the tool's, byte for byte")
+    expectEqual(hostile, Path("build/gen/hostile.ab").readText(), "the hostile names' client at compile time is the tool's")
+    testsPassed()
+}
