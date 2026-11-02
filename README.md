@@ -93,9 +93,11 @@ says where.
 
 ### Why a tool
 
-`compiler.generateModule` from a transform is what was asked for first, and on ablac 0.2.29 it can't run this: abla-xml's reader
-doesn't finish under the compile-time evaluator, and `#xmlParse` is denied as it reaches a file source. Both are in ablac's TODO.
-The generator takes bytes and gives bytes and calls nothing else, so that becomes one call when it works.
+`compiler.generateModule` from a transform is what was asked for first. On ablac 0.2.30 abla-xml's reader runs under the
+compile-time evaluator, and `#wsdlGenerateFrom(...)` gives the same bytes as the tool, but only with `trusted.native` granted: a
+program that imports `abla/simd` anywhere, as every client does through WS-Security's AES, is denied any `#` that calls a `.get`
+(in ablac's TODO). Granting a dependency native code to read a WSDL isn't worth it, so the tool stays until that's fixed. The
+generator takes bytes and gives bytes and calls nothing else, so it becomes one call then.
 
 ## By hand
 
