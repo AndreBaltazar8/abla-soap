@@ -1,0 +1,54 @@
+// wsdl2abla service.wsdl [--prefix Name] [--import 'github("...")'] [-o out.ab] [--imports dir]: writes a typed client. Imports in
+// the WSDL are read only under --imports' directory, by relative paths without "..".
+import "../src/generate.ab"
+import "abla/fs"
+import "abla/io"
+import "abla/process"
+
+class DirectoryResolver(val directory: string) : WsdlResolver {
+    fun read(location: string): string? {
+        if (directory == "") return null
+        if (location.startsWith("/") || location.indexOf("..") >= 0 || location.indexOf("://") >= 0 || location.indexOf("\\") >= 0) return null
+        val file = path("$directory/$location")
+        if (!file.exists()) return null
+        file.readText()
+    }
+}
+
+fun main: int {
+    val args: array<string> = []
+    for (i in 0 until processArgumentCount()) args.append(processArgument(i))
+    var input = ""
+    var output = ""
+    var prefix = ""
+    var soapImport = ""
+    var imports = ""
+    var at = 0
+    while (at < args.size) {
+        val a = args[at]
+        if (a == "--prefix" && at + 1 < args.size) { prefix = args[at + 1]; at = at + 2 }
+        else if (a == "-o" && at + 1 < args.size) { output = args[at + 1]; at = at + 2 }
+        else if (a == "--import" && at + 1 < args.size) { soapImport = args[at + 1]; at = at + 2 }
+        else if (a == "--imports" && at + 1 < args.size) { imports = args[at + 1]; at = at + 2 }
+        else if (input == "") { input = a; at = at + 1 }
+        else {
+            eprintln("wsdl2abla: what's $a?")
+            return 2
+        }
+    }
+    if (input == "") {
+        eprintln("usage: wsdl2abla service.wsdl [--prefix Name] [--import 'github(...)'] [--imports dir] [-o out.ab]")
+        return 2
+    }
+    val options = if (soapImport == "") WsdlGenerateOptions(prefix = prefix, origin = input) else WsdlGenerateOptions(prefix = prefix, soapImport = soapImport, origin = input)
+    val result = wsdlGenerateFrom(path(input).readText(), options, DirectoryResolver(imports))
+    val problem = result.error
+    if (problem != null) {
+        eprintln("wsdl2abla: ${problem.code}: ${problem.message}")
+        return 1
+    }
+    for (note in result.notes) eprintln("wsdl2abla: $note")
+    if (output == "") print(result.source)
+    else path(output).writeText(result.source)
+    0
+}

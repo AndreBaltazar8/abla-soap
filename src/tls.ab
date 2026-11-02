@@ -1,0 +1,51 @@
+// HTTPS and client certificates for SOAP, by their own import, so that OpenSSL links only into programs that reach them:
+//     import github("AndreBaltazar8/abla-soap/tls")
+export import "client.ab"
+import "abla/http"
+import "abla/http/tls"
+
+// A SOAP client for an https URL, checking the server's certificate against the system's or the CA file at `caPath`.
+// `SoapTlsOptions.deadlineMilliseconds` limits a whole exchange.
+class SoapTlsOptions(
+    val version: SoapVersion = soap11,
+    val headers: array<SoapHeaderSource> = [],
+    val caPath: string = "",
+    val parse: SoapParseOptions = SoapParseOptions(),
+    val understood: array<string> = [],
+    val maximumResponseBytes: int = 16777216,
+    val timeoutMilliseconds: int = 30000,
+    val deadlineMilliseconds: int = 120000
+)
+
+class SoapTlsClientResult(val client: SoapClient?, val error: string)
+
+private fun soapHttps(url: SoapUrl, http: HttpClient, options: SoapTlsOptions): SoapTlsClientResult =
+    SoapTlsClientResult(soapClient(http, url.path, options.version, options.headers, true, options.parse, options.understood), "")
+
+private fun soapHttpsUrl(url: string): SoapUrl {
+    val parsed = soapParseUrl(url)
+    if (parsed.error != "") return parsed
+    if (!parsed.tls) return SoapUrl(false, "", 0, "", "not an https URL: $url")
+    parsed
+}
+
+// No client certificate.
+fun soapHttpsClient(url: string, options: SoapTlsOptions = SoapTlsOptions()): SoapTlsClientResult {
+    val where = soapHttpsUrl(url)
+    if (where.error != "") return SoapTlsClientResult(null, where.error)
+    soapHttps(where, httpsClient(where.host, where.port, options.maximumResponseBytes, options.timeoutMilliseconds, options.deadlineMilliseconds), options)
+}
+
+// A client certificate in PEM: the certificate first and then any intermediates, and its private key.
+fun soapMutualTlsClientPem(url: string, certificatePem: string, keyPem: string, passphrase: string = "", options: SoapTlsOptions = SoapTlsOptions()): SoapTlsClientResult {
+    val where = soapHttpsUrl(url)
+    if (where.error != "") return SoapTlsClientResult(null, where.error)
+    soapHttps(where, httpsClientWithIdentityPem(where.host, certificatePem, keyPem, passphrase, options.caPath, where.port, options.maximumResponseBytes, options.timeoutMilliseconds, options.deadlineMilliseconds), options)
+}
+
+// A PKCS#12 container (.pfx), which is how AT's manual has the certificate and its key joined.
+fun soapMutualTlsClientPkcs12(url: string, der: string, password: string, options: SoapTlsOptions = SoapTlsOptions()): SoapTlsClientResult {
+    val where = soapHttpsUrl(url)
+    if (where.error != "") return SoapTlsClientResult(null, where.error)
+    soapHttps(where, httpsClientWithIdentityPkcs12(where.host, der, password, options.caPath, where.port, options.maximumResponseBytes, options.timeoutMilliseconds, options.deadlineMilliseconds), options)
+}

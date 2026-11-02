@@ -1,0 +1,107 @@
+// WS-Security UsernameToken: the plain OASIS profile, and the one the Portuguese tax authority (AT) asks for.
+export import "envelope.ab"
+import "abla/crypto"
+import "abla/crypto/aes"
+import "abla/crypto/rsa"
+import "abla/date"
+import "abla/process/time"
+import "abla/random"
+
+// One header a client adds to each call. Called afresh for each, so what it writes may change. A problem is returned as
+// text, and the call doesn't happen.
+interface SoapHeaderSource {
+    fun write(var xml: XmlWriter): string
+    // Whether what it writes is unfit to go over a plain connection.
+    fun needsTls(): bool
+}
+
+val wsseNamespace = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+val wsuNamespace = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
+val wssePasswordText = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText"
+val wssePasswordDigest = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
+val wsseBase64Binary = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
+val atSecurityNamespace = "http://schemas.xmlsoap.org/ws/2002/12/secext"
+
+class WsseClock(val now: () -> int)
+
+// The plain profile. `digest` sends Base64(SHA-1(nonce + created + password)) with a nonce; otherwise the password itself.
+class WsseUsernameToken(
+    val username: string,
+    val password: string,
+    val digest: bool = true,
+    val randomBytes: (int) -> string = { count: int -> cryptoRandomBytes(count) },
+    val nowMilliseconds: () -> int = { realtimeMilliseconds() }
+) : SoapHeaderSource {
+    fun needsTls(): bool = true
+
+    fun write(var xml: XmlWriter): string {
+        xml.startElement("wsse:Security")
+        xml.namespace("wsse", wsseNamespace)
+        xml.namespace("wsu", wsuNamespace)
+        xml.startElement("wsse:UsernameToken")
+        xml.element("wsse:Username", username)
+        val created = utcIso8601(nowMilliseconds())
+        if (digest) {
+            val nonce = randomBytes(16)
+            if (nonce.size != 16) return "no random source for the nonce"
+            xml.startElement("wsse:Password")
+            xml.attribute("Type", wssePasswordDigest)
+            xml.text(base64Encode(sha1("$nonce$created$password")))
+            xml.endElement()
+            xml.startElement("wsse:Nonce")
+            xml.attribute("EncodingType", wsseBase64Binary)
+            xml.text(base64Encode(nonce))
+            xml.endElement()
+        } else {
+            xml.startElement("wsse:Password")
+            xml.attribute("Type", wssePasswordText)
+            xml.text(password)
+            xml.endElement()
+        }
+        xml.element("wsu:Created", created)
+        xml.endElement()
+        xml.endElement()
+        ""
+    }
+}
+
+// AT's profile, from its "Manual de Integração de Software, Comunicação por webservice, Aspetos genéricos", 2.2.1: for each
+// request a new AES key, RSA-encrypted under AT's public key for Nonce, and which encrypts the password and the time in ECB
+// with PKCS#5 padding. All three in Base64. AT's choice of primitives, not this library's: they are in the protocol.
+//
+// `publicKey` is AT's key ("ChavePublicaAT"), given as `rsaPublicKeyFromPem` reads it, certificate or key. The username is
+// "NIF/subuser", or "NIF" for the main user.
+class AtUsernameToken(
+    val username: string,
+    val password: string,
+    val publicKey: RsaPublicKey,
+    val randomBytes: (int) -> string = { count: int -> cryptoRandomBytes(count) },
+    val nowMilliseconds: () -> int = { realtimeMilliseconds() }
+) : SoapHeaderSource {
+    fun needsTls(): bool = true
+
+    fun write(var xml: XmlWriter): string {
+        if (!publicKey.ok()) return "AT's public key: ${publicKey.error}"
+        val key = randomBytes(16)
+        if (key.size != 16) return "no random source for the request's key"
+        val nonce = publicKey.encryptPkcs1Legacy(key)
+        if (!nonce.ok) return "encrypting the request's key: ${nonce.error}"
+        val secret = aesEcbEncryptPkcs5(key, password)
+        if (!secret.ok) return "encrypting the password: ${secret.error}"
+        val created = aesEcbEncryptPkcs5(key, utcIso8601(nowMilliseconds()))
+        if (!created.ok) return "encrypting the time: ${created.error}"
+        xml.startElement("wss:Security")
+        xml.namespace("wss", atSecurityNamespace)
+        xml.startElement("wss:UsernameToken")
+        xml.element("wss:Username", username)
+        xml.element("wss:Password", base64Encode(secret.bytes))
+        xml.element("wss:Nonce", base64Encode(nonce.bytes))
+        xml.element("wss:Created", base64Encode(created.bytes))
+        xml.endElement()
+        xml.endElement()
+        ""
+    }
+}
+
+fun atUsernameToken(username: string, password: string, publicKeyPem: string): AtUsernameToken =
+    AtUsernameToken(username, password, rsaPublicKeyFromPem(publicKeyPem))

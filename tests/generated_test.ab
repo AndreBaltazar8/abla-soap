@@ -1,0 +1,189 @@
+// A client generated from tests/fixtures/shop.wsdl by `make generate`, on a canned transport.
+import "../build/gen/shop.ab"
+import "../src/soap.ab"
+import "abla/http"
+import "abla/test"
+import "abla/text"
+import "abla/crypto"
+
+val e11 = "<e:Envelope xmlns:e=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+val e12 = "<e:Envelope xmlns:e=\"http://www.w3.org/2003/05/soap-envelope\">"
+
+var seen: array<string> = []
+
+fun reply(body: string, status: int = 200): HttpClient = httpClient("svc:1", { request: string, maximum: int, timeout: int ->
+    seen.append(request)
+    HttpTransportResult("HTTP/1.1 $status X\r\nContent-Length: ${body.size}\r\n\r\n$body", true)
+})
+
+fun orders(body: string, status: int = 200): ShopOrdersSoapClient = ShopOrdersSoapClient(soapClient(reply(body, status), "/orders", shopOrdersSoapClientVersion))
+
+fun blobOf(v: ShopPlaceOrderResponse): string {
+    val b = v.blob
+    if (b != null) b else ""
+}
+
+fun sentBody(): string {
+    val request = seen[seen.size - 1]
+    request.slice(request.indexOf("\r\n\r\n") + 4, request.size)
+}
+
+fun order(): ShopPlaceOrder = ShopPlaceOrder(
+    revision = 3,
+    channel = "web",
+    status = ShopStatus_paid_in_full,
+    count = "123456789012345678901234567890",
+    paid = true,
+    blob = base64Decode("AP8gYnl0ZXM="),
+    lines = [ShopLine(
+        kind = "k",
+        id = 9007199254740993,
+        name = "A & B",
+        in_ = "x",
+        price = ShopMoney(currency = "EUR", value = "12.50"),
+        quantity = 7,
+        children = [ShopLine(kind = "c", id = 2, name = "child", price = ShopMoney(currency = "USD", value = "0.10"), quantity = 1)]
+    )],
+    plain = "p",
+    email = "a@b",
+    note = "n",
+    by = "ana",
+    address = ShopPlaceOrderAddress(city = "Porto")
+)
+
+// the request, byte for byte
+fun case0(): void {
+    seen = []
+    val call = orders("$e11<e:Body><m:placeOrderResponse xmlns:m=\"urn:shop\"><m:id>1</m:id><m:total currency=\"EUR\">1.00</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe>x</m:maybe></m:placeOrderResponse></e:Body></e:Envelope>").placeOrder(order(), "S1")
+    expect(call.ok(), "a good call: ${call.problem()}")
+    expect(seen[0].indexOf("SOAPAction: \"urn:shop/placeOrder\"\r\n") > 0, "the action")
+    expectEqual(sentBody(), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header><tns:session xmlns:tns=\"urn:shop\" xmlns:ns1=\"urn:sums\" xmlns:ns2=\"urn:common\">S1</tns:session></soapenv:Header><soapenv:Body><tns:placeOrder xmlns:tns=\"urn:shop\" xmlns:ns1=\"urn:sums\" xmlns:ns2=\"urn:common\" revision=\"3\" ns2:channel=\"web\"><tns:status>paid-in full</tns:status><tns:count>123456789012345678901234567890</tns:count><tns:paid>true</tns:paid><tns:blob>AP8gYnl0ZXM=</tns:blob><tns:lines kind=\"k\"><tns:id>9007199254740993</tns:id><tns:name>A &amp; B</tns:name><tns:in>x</tns:in><tns:price currency=\"EUR\">12.50</tns:price><tns:quantity>7</tns:quantity><tns:children kind=\"c\"><tns:id>2</tns:id><tns:name>child</tns:name><tns:price currency=\"USD\">0.10</tns:price><tns:quantity>1</tns:quantity></tns:children></tns:lines><tns:maybe xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:nil=\"true\"/><plain>p</plain><tns:email>a@b</tns:email><ns2:note>n</ns2:note><tns:by>ana</tns:by><tns:address><tns:city>Porto</tns:city></tns:address></tns:placeOrder></soapenv:Body></soapenv:Envelope>", "bytes")
+    return
+}
+
+// the response, every kind of value
+fun case1(): void {
+    seen = []
+    val call = orders("$e11<e:Body><m:placeOrderResponse xmlns:m=\"urn:shop\"><m:id>-42</m:id><m:total currency=\"EUR\">12.50</m:total><m:count>123456789012345678901234567890</m:count><m:paid>true</m:paid><m:blob>AP8gYnl0ZXM=</m:blob><m:lines kind=\"k\"><m:id>7</m:id><m:name>top</m:name><m:price currency=\"PTE\">5</m:price><m:quantity>2</m:quantity><m:children kind=\"c\"><m:id>8</m:id><m:name>down</m:name><m:price currency=\"PTE\">1</m:price><m:quantity>1</m:quantity></m:children></m:lines><m:maybe xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\" i:nil=\"true\"/><m:more>a</m:more><m:more>b</m:more><m:unknown>ignored</m:unknown></m:placeOrderResponse></e:Body></e:Envelope>").placeOrder(order(), "S1")
+    expect(call.ok(), "ok: ${call.problem()}")
+    val v = call.value
+    expect(v != null, "a value")
+    if (v != null) {
+        expectEqual(v.id, -42, "long")
+        expectEqual(v.total.value, "12.50", "simple content, exactly")
+        expectEqual(v.total.currency, "EUR", "attribute")
+        expectEqual(v.count, "123456789012345678901234567890", "beyond a long")
+        expect(v.paid, "bool")
+        expectEqual(blobOf(v), base64Decode("AP8gYnl0ZXM="), "base64")
+        expectEqual(v.lines.size, 1, "array")
+        expectEqual(v.lines[0].children[0].name, "down", "recursion")
+        expectEqual(v.lines[0].kind, "k", "an inherited attribute")
+        expectEqual(v.lines[0].id, 7, "an inherited element")
+        expectEqual(v.lines[0].quantity, 2, "digits few enough for an int")
+        expect(v.maybe == null, "nil")
+        expectEqual(v.more.size, 2, "more")
+    }
+    return
+}
+
+// elements that a server wrongly qualifies, or doesn't, are still found
+fun case2(): void {
+    seen = []
+    val call = orders("$e11<e:Body><placeOrderResponse xmlns=\"urn:shop\"><id xmlns=\"\">1</id><total xmlns=\"urn:elsewhere\" currency=\"EUR\">1</total><count>1</count><paid>false</paid><maybe/></placeOrderResponse></e:Body></e:Envelope>").placeOrder(order(), "S")
+    expect(call.ok(), "ok: ${call.problem()}")
+    return
+}
+
+// what doesn't decode is a problem, not a value
+fun case3(): void {
+    seen = []
+    val cases = [
+        "<m:id>1</m:id><m:total currency=\"EUR\">1</m:total><m:count>x</m:count><m:paid>1</m:paid><m:maybe/>",
+        "<m:id>abc</m:id><m:total currency=\"EUR\">1</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe/>",
+        "<m:id>99999999999999999999</m:id><m:total currency=\"EUR\">1</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe/>",
+        "<m:id>1</m:id><m:total currency=\"EUR\">one</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe/>",
+        "<m:id>1</m:id><m:total>1</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe/>",
+        "<m:id>1</m:id><m:total currency=\"EUR\">1</m:total><m:count>1</m:count><m:paid>maybe</m:paid><m:maybe/>",
+        "<m:id>1</m:id><m:total currency=\"EUR\">1</m:total><m:count>1</m:count><m:paid>1</m:paid><m:blob>!!!</m:blob><m:maybe/>",
+        "<m:total currency=\"EUR\">1</m:total><m:count>1</m:count><m:paid>1</m:paid><m:maybe/>"
+    ]
+    for (inner in cases) {
+        val call = orders("$e11<e:Body><m:placeOrderResponse xmlns:m=\"urn:shop\">$inner</m:placeOrderResponse></e:Body></e:Envelope>").placeOrder(order(), "S")
+        expect(!call.ok(), "refused: $inner")
+        expect(call.problem() != "", "explained: $inner")
+    }
+    val other = orders("$e11<e:Body><other/></e:Body></e:Envelope>").placeOrder(order(), "S")
+    expect(!other.ok() && other.problem().indexOf("expected placeOrderResponse") >= 0, "another element")
+    val none = orders("$e11<e:Body/></e:Envelope>").placeOrder(order(), "S")
+    expect(!none.ok(), "an empty body")
+    return
+}
+
+// a fault comes through, and its declared detail reads
+fun case4(): void {
+    seen = []
+    val call = orders("$e11<e:Body><e:Fault><faultcode>e:Client</faultcode><faultstring>no</faultstring><detail><OrderFault xmlns=\"urn:shop\"><reason>stock</reason></OrderFault></detail></e:Fault></e:Body></e:Envelope>", 500).placeOrder(order(), "S")
+    expect(!call.ok(), "not ok")
+    val f = call.fault()
+    expect(f != null, "a fault")
+    if (f != null) {
+        val detail = f.detail
+        if (detail != null) {
+            val inner = detail.child("OrderFault")
+            if (inner != null) {
+                var d = soapDecoder()
+                val read = shopOrderFaultRead(d, inner, "detail")
+                expectEqual(if (read != null) read.reason else "", "stock", "typed")
+            }
+        }
+    }
+    expectEqual(call.problem(), "fault e:Client: no", "a line")
+    return
+}
+
+// scalars at the root, and an operation with no output
+fun case5(): void {
+    seen = []
+    val call = orders("$e11<e:Body><pong xmlns=\"urn:shop\">42</pong></e:Body></e:Envelope>").ping("hi")
+    expect(call.ok(), "ok: ${call.problem()}")
+    val v = call.value
+    expectEqual(if (v != null) v else 0, 42, "int")
+    expect(sentBody().indexOf("<tns:ping xmlns:tns=\"urn:shop\" xmlns:ns1=\"urn:sums\" xmlns:ns2=\"urn:common\">hi</tns:ping>") > 0, "string")
+    val gone = orders("", 202).forget("hi")
+    expect(gone.ok(), "one-way: ${gone.problem()}")
+    return
+}
+
+// rpc literal under SOAP 1.2
+fun case6(): void {
+    seen = []
+    val client = ShopSumsRpc12Client(soapClient(reply("$e12<e:Body><r:addResponse xmlns:r=\"urn:sums\"><sum>5</sum></r:addResponse></e:Body></e:Envelope>"), "/sums", shopSumsRpc12ClientVersion))
+    val call = client.add(ShopAddRequest(a = 2, b = 3))
+    expect(call.ok(), "ok: ${call.problem()}")
+    val v = call.value
+    expectEqual(if (v != null) v.sum else 0, 5, "sum")
+    expect(seen[0].indexOf("application/soap+xml; charset=utf-8; action=\"urn:sums/add\"") > 0, "1.2's action")
+    expect(sentBody().indexOf("<a>2</a><b>3</b>") > 0, "unqualified parts")
+    expect(sentBody().indexOf(":add ") > 0, "the wrapper, in the body's namespace")
+    expect(sentBody().indexOf("=\"urn:sums\"") > 0, "that namespace")
+    return
+}
+
+// the location and the enumerations are there
+fun case7(): void {
+    expectEqual(shopShopServiceOrdersPortLocation, "https://shop.example:8443/orders", "location")
+    expectEqual(ShopStatus_open, "open", "enumeration")
+    return
+}
+
+fun main: int {
+    case0()
+    case1()
+    case2()
+    case3()
+    case4()
+    case5()
+    case6()
+    case7()
+    testsPassed()
+}

@@ -1,0 +1,335 @@
+// SOAP envelopes on abla-xml: writing them in order, and parsing them into headers, a body and a fault.
+export import github("AndreBaltazar8/abla-xml")
+
+val soap11Namespace = "http://schemas.xmlsoap.org/soap/envelope/"
+val soap12Namespace = "http://www.w3.org/2003/05/soap-envelope"
+val soapXmlNamespace = "http://www.w3.org/XML/1998/namespace"
+
+class SoapVersion(val name: string, val namespace: string, val mediaType: string)
+
+val soap11 = SoapVersion("1.1", soap11Namespace, "text/xml")
+val soap12 = SoapVersion("1.2", soap12Namespace, "application/soap+xml")
+
+class SoapError(val code: string, val message: string)
+
+// --- Writing -----------------------------------------------------------------------------------
+
+class SoapWriteResult(val succeeded: bool, val text: string, val error: SoapError?)
+
+// Calls go startHeader, what's in the header through `xml`, endHeader, startBody, what's in the body through `xml`,
+// finish; the header is optional. Errors are sticky, as the XML writer's are, and finish reports them.
+class SoapWriter(
+    val version: SoapVersion,
+    val prefix: string,
+    val xml: XmlWriter,
+    // 0 before the header, 1 in it, 2 after it, 3 in the body, 4 finished.
+    var part: int,
+    var problem: string
+) {
+    fun startHeader(): void {
+        if (part != 0) problem = "the header goes once, before the body"
+        else {
+            part = 1
+            xml.startElement("$prefix:Header")
+        }
+        return
+    }
+
+    fun endHeader(): void {
+        if (part != 1) problem = "no header is open"
+        else {
+            part = 2
+            xml.endElement()
+        }
+        return
+    }
+
+    fun startBody(): void {
+        if (part != 0 && part != 2) problem = "the body goes once, after the header"
+        else {
+            part = 3
+            xml.startElement("$prefix:Body")
+        }
+        return
+    }
+
+    fun finish(): SoapWriteResult {
+        if (part != 3) problem = "an envelope needs one body"
+        else {
+            xml.endElement()
+            xml.endElement()
+        }
+        part = 4
+        val written = xml.finish()
+        if (problem != "") return SoapWriteResult(false, "", SoapError("order", problem))
+        if (!written.succeeded) return SoapWriteResult(false, "", SoapError(written.errorCode, written.errorMessage))
+        SoapWriteResult(true, written.text, null)
+    }
+}
+
+// `prefix` is the envelope's, which a service shouldn't care about and some do.
+fun soapWriter(version: SoapVersion = soap11, prefix: string = "soapenv", declaration: bool = true): SoapWriter {
+    val xml = xmlWriter()
+    if (declaration) xml.declaration()
+    xml.startElement("$prefix:Envelope")
+    xml.namespace(prefix, version.namespace)
+    SoapWriter(version, prefix, xml, 0, "")
+}
+
+// A fault into a body that's open; for servers and for tests of clients. A code is a local name of the envelope's namespace,
+// Client or Server under 1.1, Sender or Receiver under 1.2.
+fun soapWriteFault(var writer: SoapWriter, code: string, message: string, language: string = "en"): void {
+    val p = writer.prefix
+    writer.xml.startElement("$p:Fault")
+    if (writer.version.name == "1.1") {
+        writer.xml.element("faultcode", "$p:$code")
+        writer.xml.element("faultstring", message)
+    } else {
+        writer.xml.startElement("$p:Code")
+        writer.xml.element("$p:Value", "$p:$code")
+        writer.xml.endElement()
+        writer.xml.startElement("$p:Reason")
+        writer.xml.startElement("$p:Text")
+        writer.xml.attribute("xml:lang", language)
+        writer.xml.text(message)
+        writer.xml.endElement()
+        writer.xml.endElement()
+    }
+    writer.xml.endElement()
+    return
+}
+
+// --- Parsing -----------------------------------------------------------------------------------
+
+// Limits on what comes back. A DOCTYPE is always refused, as SOAP has no place for one, and so are external entities and
+// entity expansion with it; there's no option for them.
+class SoapParseOptions(
+    val maxBytes: int = 16777216,
+    val maxDepth: int = 128,
+    val maxNodes: int = 1048576,
+    val maxValueBytes: int = 16777216
+)
+
+// A faultcode or Value, or a Subcode's: a local name and the namespace its prefix had where it was written.
+class SoapFaultCode(val local: string, val namespace: string, val text: string)
+
+class SoapFaultReason(val language: string, val text: string)
+
+class SoapFault(
+    val version: SoapVersion,
+    // Client, Server, MustUnderstand, VersionMismatch under 1.1; Sender, Receiver, ... under 1.2.
+    val code: SoapFaultCode,
+    // Most general first; 1.2 only.
+    val subcodes: array<SoapFaultCode>,
+    // The first reason's text.
+    val message: string,
+    val reasons: array<SoapFaultReason>,
+    // faultactor under 1.1, Role under 1.2.
+    val role: string,
+    val node: string,
+    val detail: XmlElement?
+) {
+    fun isFrom(local: string, namespace: string = xmlAnyNamespace): bool =
+        code.local == local && (namespace == xmlAnyNamespace || code.namespace == namespace)
+
+    // Whether the sender was blamed, whichever version says so.
+    fun blamesSender(): bool = code.namespace == version.namespace && (code.local == "Client" || code.local == "Sender")
+}
+
+class SoapEnvelope(
+    val version: SoapVersion,
+    val root: XmlElement,
+    val headers: array<XmlElement>,
+    val body: XmlElement,
+    val fault: SoapFault?
+) {
+    // The first element in the body, if any.
+    fun content(): XmlElement? {
+        val all = body.elements()
+        if (all.size > 0) all[0] else null
+    }
+
+    fun header(localName: string, namespaceUri: string = xmlAnyNamespace): XmlElement? {
+        for (candidate in headers) {
+            if (candidate.localName == localName && xmlNamespaceMatches(candidate.namespaceUri, namespaceUri)) return candidate
+        }
+        null
+    }
+}
+
+class SoapParseResult(val succeeded: bool, val envelope: SoapEnvelope?, val error: SoapError?)
+
+private fun soapParseFailed(code: string, message: string): SoapParseResult = SoapParseResult(false, null, SoapError(code, message))
+
+private fun soapBlank(text: string): bool {
+    for (c in text) if (c != 32 && c != 9 && c != 10 && c != 13) return false
+    true
+}
+
+// What SOAP says may not be there, anywhere: processing instructions. Depth is bounded by the parser.
+private fun soapHoldsInstruction(element: XmlElement): bool {
+    for (node in element.children) {
+        when (node) {
+            is XmlProcessingInstruction -> return true
+            is XmlElement -> { if (soapHoldsInstruction(node)) return true }
+            else -> {}
+        }
+    }
+    false
+}
+
+private fun soapNodesHoldInstruction(nodes: array<XmlNode>): bool {
+    for (node in nodes) {
+        when (node) {
+            is XmlProcessingInstruction -> return true
+            else -> {}
+        }
+    }
+    false
+}
+
+// Text directly in an element that should only hold elements.
+private fun soapHoldsText(element: XmlElement): bool {
+    for (node in element.children) {
+        when (node) {
+            is XmlText -> { if (!soapBlank(node.text)) return true }
+            else -> {}
+        }
+    }
+    false
+}
+
+// The namespace of a prefix at `element`, looking outward through `outer`, innermost last.
+fun soapLookupPrefix(prefix: string, element: XmlElement, outer: array<XmlElement>): string {
+    val wanted = if (prefix == "") "xmlns" else "xmlns:$prefix"
+    for (attribute in element.attributes) if (attribute.name == wanted) return attribute.value
+    var at = outer.size - 1
+    while (at >= 0) {
+        for (attribute in outer[at].attributes) if (attribute.name == wanted) return attribute.value
+        at = at - 1
+    }
+    if (prefix == "xml") soapXmlNamespace else ""
+}
+
+private fun soapFaultCode(text: string, element: XmlElement, outer: array<XmlElement>): SoapFaultCode {
+    val value = text.trim()
+    val colon = value.indexOf(":")
+    if (colon < 0) return SoapFaultCode(value, soapLookupPrefix("", element, outer), value)
+    SoapFaultCode(value.slice(colon + 1, value.size), soapLookupPrefix(value.slice(0, colon), element, outer), value)
+}
+
+private fun soapWith(outer: array<XmlElement>, element: XmlElement): array<XmlElement> {
+    val all: array<XmlElement> = []
+    for (e in outer) all.append(e)
+    all.append(element)
+    all
+}
+
+private fun soapParseFault11(fault: XmlElement, outer: array<XmlElement>): SoapFault {
+    // The children of a 1.1 fault have no namespace, and some servers qualify them regardless.
+    val code = fault.child("faultcode")
+    val parsedCode = if (code != null) soapFaultCode(code.text(), code, soapWith(outer, fault)) else SoapFaultCode("", "", "")
+    val message = fault.childText("faultstring")
+    SoapFault(soap11, parsedCode, [], message, [SoapFaultReason("", message)], fault.childText("faultactor"), "", fault.child("detail"))
+}
+
+private fun soapParseFault12(fault: XmlElement, outer: array<XmlElement>): SoapFault {
+    val ns = soap12Namespace
+    var code = SoapFaultCode("", "", "")
+    val subcodes: array<SoapFaultCode> = []
+    val scope: array<XmlElement> = []
+    for (e in outer) scope.append(e)
+    scope.append(fault)
+    var level = fault.child("Code", ns)
+    var first = true
+    while (true) {
+        val here = level
+        if (here == null) break
+        val value = here.child("Value", ns)
+        if (value != null) {
+            val parsed = soapFaultCode(value.text(), value, scope)
+            if (first) code = parsed else subcodes.append(parsed)
+        }
+        first = false
+        scope.append(here)
+        level = here.child("Subcode", ns)
+    }
+    val reasons: array<SoapFaultReason> = []
+    val reason = fault.child("Reason", ns)
+    if (reason != null) {
+        for (text in reason.elements("Text", ns)) reasons.append(SoapFaultReason(text.attributeValue("lang", "", soapXmlNamespace), text.text()))
+    }
+    SoapFault(soap12, code, subcodes, if (reasons.size > 0) reasons[0].text else "", reasons, fault.childText("Role", ns), fault.childText("Node", ns), fault.child("Detail", ns))
+}
+
+fun soapParse(source: string, options: SoapParseOptions = SoapParseOptions()): SoapParseResult {
+    val parsed = xmlParse(source, XmlOptions(
+        maxBytes = options.maxBytes, maxDepth = options.maxDepth, maxNodes = options.maxNodes,
+        maxValueBytes = options.maxValueBytes, allowDtd = false
+    ))
+    val problem = parsed.error
+    if (problem != null) return soapParseFailed("xml_${problem.code}", problem.message)
+    val document = parsed.document
+    if (document == null) return soapParseFailed("xml", "no document")
+    val root = document.root
+    if (root.localName != "Envelope") return soapParseFailed("not_an_envelope", "the root element is ${root.name}")
+    val version = if (root.namespaceUri == soap11Namespace) soap11 else if (root.namespaceUri == soap12Namespace) soap12 else null
+    if (version == null) return soapParseFailed("version_mismatch", "the envelope's namespace is '${root.namespaceUri}'")
+    if (soapNodesHoldInstruction(document.prolog) || soapNodesHoldInstruction(document.epilog) || soapHoldsInstruction(root)) {
+        return soapParseFailed("processing_instruction", "SOAP messages may not hold processing instructions")
+    }
+    if (soapHoldsText(root)) return soapParseFailed("stray_text", "text directly in the envelope")
+    var headers: array<XmlElement> = []
+    var body: XmlElement? = null
+    var seenHeader = false
+    for (child in root.elements()) {
+        val name = child.localName
+        val own = child.namespaceUri == version.namespace
+        if (own && name == "Header" && body == null && !seenHeader) {
+            seenHeader = true
+            headers = child.elements()
+        } else if (own && name == "Body" && body == null) {
+            body = child
+        } else if (own && (name == "Header" || name == "Body")) {
+            return soapParseFailed("misplaced_part", "a second or late $name")
+        } else if (version.name == "1.2" || body == null) {
+            // 1.1 allows elements after the body. Neither allows them before it.
+            return soapParseFailed("misplaced_part", "${child.name} in the envelope")
+        }
+    }
+    val present = body
+    if (present == null) return soapParseFailed("no_body", "the envelope has no body")
+    var fault: SoapFault? = null
+    val contents = present.elements()
+    val faultElement = present.child("Fault", version.namespace)
+    if (faultElement != null) {
+        if (contents.size != 1) return soapParseFailed("misplaced_fault", "a fault must be alone in the body")
+        fault = if (version.name == "1.1") soapParseFault11(faultElement, [root, present]) else soapParseFault12(faultElement, [root, present])
+    }
+    SoapParseResult(true, SoapEnvelope(version, root, headers, present, fault), null)
+}
+
+private fun soapTargetsUs(version: SoapVersion, header: XmlElement): bool {
+    if (version.name == "1.1") {
+        val actor = header.attributeValue("actor", "", soap11Namespace)
+        return actor == "" || actor == "http://schemas.xmlsoap.org/soap/actor/next"
+    }
+    val role = header.attributeValue("role", "", soap12Namespace)
+    role == "" || role == "http://www.w3.org/2003/05/soap-envelope/role/next" || role == "http://www.w3.org/2003/05/soap-envelope/role/ultimateReceiver"
+}
+
+// The headers for this receiver marked mustUnderstand and not in `understood`, as `local` or `{namespace}local`.
+fun soapNotUnderstood(envelope: SoapEnvelope, understood: array<string>): array<XmlElement> {
+    val left: array<XmlElement> = []
+    for (header in envelope.headers) {
+        val flag = header.attributeValue("mustUnderstand", "", envelope.version.namespace).trim()
+        if ((flag == "1" || flag == "true") && soapTargetsUs(envelope.version, header)) {
+            var known = false
+            for (name in understood) {
+                if (name == header.localName || name == "{${header.namespaceUri}}${header.localName}") known = true
+            }
+            if (!known) left.append(header)
+        }
+    }
+    left
+}

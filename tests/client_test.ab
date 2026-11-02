@@ -1,0 +1,235 @@
+import "../src/soap.ab"
+import "abla/http"
+import "abla/test"
+import "abla/text"
+import "abla/crypto"
+import "abla/crypto/aes"
+import "abla/crypto/rsa"
+import "abla/date"
+
+val e11 = "<e:Envelope xmlns:e=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+val e12 = "<e:Envelope xmlns:e=\"http://www.w3.org/2003/05/soap-envelope\">"
+
+// A throwaway pair made for this test and used for nothing else.
+val testCertificate = "-----BEGIN CERTIFICATE-----\nMIIDFTCCAf2gAwIBAgIUGVl4m054xxWrwtJRRX/v4nPb7xgwDQYJKoZIhvcNAQEL\nBQAwGTEXMBUGA1UEAwwOYWJsYS1zb2FwLXRlc3QwIBcNMjYxMTAyMDU1MzM3WhgP\nMjEyNjEwMDkwNTUzMzdaMBkxFzAVBgNVBAMMDmFibGEtc29hcC10ZXN0MIIBIjAN\nBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6KdvlVTSpMkKEhzO/p4/nfEyORjP\nFcl82nKrfQvIQqzCPGeF/mX5qc4A7gPXUcLPC4SkJnsdBNyu8gCTzdbCUYW+1FHx\ncPaVUXmrHLMI8BZ/XgjoHSEmQkRPXYQsFAajmJHAQW21yX+6nQgvLiLsK+m0cU+T\nXfvr++XFe9OKlfW3qMA+cATMDKw/GVExS0AAoJ36hPP1joPRUxTAsjYSKqicgVSJ\nzsJTA6ABQrukZGUS8N7yiO1ZE6BqUfUSnKTb9WQ+DpNxKXeQEJCaFdwoOxsev/jv\nb0fcwPA1/+KlMf/C3GKfTE0ANYJjKSwxgvPIi+Vl3lliI2FvS50hBAwPfwIDAQAB\no1MwUTAdBgNVHQ4EFgQUK7zpgLR+uTMY4hC4fAct1jbK8qEwHwYDVR0jBBgwFoAU\nK7zpgLR+uTMY4hC4fAct1jbK8qEwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B\nAQsFAAOCAQEAXeTuUO9OfsomdoyPVyP73oor8oF85mp5OYjopKq9+wNQjAOODyVk\n2PA0r2RVORDJO1Gu1e48BJCL4mYZPKU16jVObS79yqQnj25AA4UQX104f81KcRIh\n6CrZSRcboiLpA1ZLhxB2TKPBMTjIuSVHcl2iRdbyT3C0FBkqUaLzH6ESc0vG8ARb\nL3uP17ZoGxj6vQgPR4pZErxI3RyZilr7ICGatCwPlGAUvTXvdkd69eaMFzcDdeK4\nUmkLTmsdG5IAOA7r4RhGsEmnOe6H+b6D81fS7WXeguf2023v0p4j+3txlSCuB/JF\nOldGlQXc75jKCeEAZ97Gf0FefRzBj3kUkw==\n-----END CERTIFICATE-----\n"
+val testKey = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDop2+VVNKkyQoS\nHM7+nj+d8TI5GM8VyXzacqt9C8hCrMI8Z4X+ZfmpzgDuA9dRws8LhKQmex0E3K7y\nAJPN1sJRhb7UUfFw9pVReascswjwFn9eCOgdISZCRE9dhCwUBqOYkcBBbbXJf7qd\nCC8uIuwr6bRxT5Nd++v75cV704qV9beowD5wBMwMrD8ZUTFLQACgnfqE8/WOg9FT\nFMCyNhIqqJyBVInOwlMDoAFCu6RkZRLw3vKI7VkToGpR9RKcpNv1ZD4Ok3Epd5AQ\nkJoV3Cg7Gx6/+O9vR9zA8DX/4qUx/8LcYp9MTQA1gmMpLDGC88iL5WXeWWIjYW9L\nnSEEDA9/AgMBAAECggEAFQvEd81HCtoW26GYhgb5uUdu5CRe41kpPred1L+Cm6l2\nHrG8uNEvvxEgG2fkjARj52ZV1RdQ/jYaa1DrDfVN+cLwCtPo0++yfT7U4FE/zzwx\nxGdo2+26QMdeKJcCx8L7/Jq+ugx7I+G2l2r8nZ9SHvzSsmdg7OETrWNRNIzj3gHC\ntodIWOyw3OQNDaTw9UxbHrPI32094Tb0/lrPtjlJAqmtXtx4VHa4Afm9W30veFz9\nlhtyzCEO2ofk0wIHpjnTNRps5ZYiXc/Up2iwVmyyKPr5HLL4/4oXdWJnK44TsuMe\nyBlpVFBy8QB3EwpexWwXr5mxwOeqlZcTU86NkYNRQQKBgQD0HRv/jQO3AfX+xJfE\n+IuraVyi1Ohf8UHU5S8/+Sfy0ffAMVaagMIRUkWN5MtyK1kB2I4Ct1TQnynQEoG0\nUb/JYKRLYb6+t5BmofiXA9fRwBmq2KYTD1KEFrGdH6Tf4oeMdRt0B0ei+jv5wo6r\naJ8Vgs8Kucl6gfDL/rRHcw5qwQKBgQDz+3svhuAZ1NjXhYp7DyJBF0MWj60MJhAf\n0w6WP0jAoXFyj1h/yr/f5oU1EXDbQPN0pSZ432YC/9z90/qVZwHE90MW4dAZrAm6\n2yiB44foS8J4CqRr87L6E9mongilmGkXf234b3/QrcCnj1v2FK4Uca1ukfGUzETV\nhnmvZaRKPwKBgQDalXIrmt43sbbO4MQxaIjP/PEpENHejw3ujyWG+BgwUpiwbL1q\nbV7Y2b1UOAl/+pahk4JdpkF46Pwsx1WC3CyKKlIS+bwt0/qmG+SXfKZ0t7mEBKh4\nqqCtjBCQa/RbUOElAPuLIrWflse7dd4AWBcS0OWJaiCh5NZ0I2bUD49aQQKBgQDq\ntmhobWFTmF7O30o8Xm++nKlOoAOCp29lnj3vLoxHvEgORHaH4b26oOJPDis60f4j\nnekn6QoTIqAvk+kCJ2kdWh2xeqUevVFS8BjE8+XABHndz6cjrvrj94qx2u5ImBmp\noE5j7KfSUgT/bTuzvWtGgaGtuDrmwagKnmab5LUrMwKBgBHnYkzLWhZsOw5MqQTJ\nLtzn6GaJEW/7lgdbgqNeqxCRknCW8gmcwwlSwRcj+MhM18mxdr4enFvDNI/10dTk\nKlGifQoZ5YUo0TqUtQpHMkWddSePfPEYLY4VW63Wfb8Qcc/ZH2JM0L88ry/VUO7O\nEGksoFNmu2Uza1g93v2AgGc4\n-----END PRIVATE KEY-----\n"
+
+var seen: array<string> = []
+
+fun canned(reply: string): HttpClient = httpClient("svc.example:1", { request: string, maximum: int, timeout: int ->
+    seen.append(request)
+    HttpTransportResult(reply, true)
+})
+
+fun reply(status: int, body: string): string = "HTTP/1.1 $status X\r\nContent-Length: ${body.size}\r\n\r\n$body"
+
+// Sends one call whose body is <m:Ping/>.
+fun ping(client: SoapClient, action: string = "urn:ping"): SoapResponse {
+    var out = client.begin()
+    out.body()
+    out.writer.xml.startElement("m:Ping")
+    out.writer.xml.namespace("m", "urn:m")
+    out.writer.xml.endElement()
+    client.send(action, out)
+}
+
+fun errorCode(response: SoapResponse): string {
+    val e = response.error
+    if (e != null) e.code else ""
+}
+
+fun between(text: string, begin: string, end: string): string {
+    val at = text.indexOf(begin)
+    if (at < 0) return ""
+    val from = at + begin.size
+    val rest = text.slice(from, text.size)
+    val stop = rest.indexOf(end)
+    if (stop < 0) "" else rest.slice(0, stop)
+}
+
+fun rawCode(raw: string): string {
+    seen = []
+    errorCode(ping(soapClient(canned(raw), "/")))
+}
+
+// 1.1 and 1.2 send what each says
+fun case0(): void {
+    seen = []
+    val ok = reply(200, "$e11<e:Body><r/></e:Body></e:Envelope>")
+    val a = ping(soapClient(canned(ok), "/svc"))
+    expect(a.ok(), "ok")
+    expect(seen[0].startsWith("POST /svc HTTP/1.1\r\n"), "line")
+    expect(seen[0].indexOf("Content-Type: text/xml; charset=utf-8\r\n") > 0, "1.1 type")
+    expect(seen[0].indexOf("SOAPAction: \"urn:ping\"\r\n") > 0, "1.1 action")
+    expect(seen[0].indexOf("<m:Ping xmlns:m=\"urn:m\"/></soapenv:Body></soapenv:Envelope>") > 0, "body")
+    val ok12 = reply(200, "$e12<e:Body><r/></e:Body></e:Envelope>")
+    val b = ping(soapClient(canned(ok12), "/svc", soap12))
+    expect(b.ok(), "ok 1.2")
+    expect(seen[1].indexOf("Content-Type: application/soap+xml; charset=utf-8; action=\"urn:ping\"\r\n") > 0, "1.2 type")
+    expect(seen[1].indexOf("SOAPAction") < 0, "no SOAPAction under 1.2")
+    return
+}
+
+// a fault is the answer, whatever the status
+fun case1(): void {
+    seen = []
+    val fault = "$e11<e:Body><e:Fault><faultcode>e:Server</faultcode><faultstring>no</faultstring></e:Fault></e:Body></e:Envelope>"
+    for (status in [500, 200, 400]) {
+        val r = ping(soapClient(canned(reply(status, fault)), "/"))
+        val f = r.fault
+        expect(f != null && f.message == "no", "fault at $status")
+        expectEqual(r.status, status, "status")
+        expect(!r.ok(), "not ok")
+    }
+    // A server that speaks only 1.1, asked in 1.2.
+    val mismatch = ping(soapClient(canned(reply(500, "$e11<e:Body><e:Fault><faultcode>e:VersionMismatch</faultcode><faultstring>1.1 only</faultstring></e:Fault></e:Body></e:Envelope>")), "/", soap12))
+    val m = mismatch.fault
+    expect(m != null && m.isFrom("VersionMismatch"), "said in its own version")
+    return
+}
+
+// what isn't an answer is an error
+fun case2(): void {
+    seen = []
+    expectEqual(rawCode(reply(404, "<html>nope</html>")), "http", "not an envelope, at 404")
+    expectEqual(rawCode(reply(200, "<html>nope</html>")), "not_an_envelope", "not an envelope, at 200")
+    expectEqual(rawCode(reply(500, "")), "http", "empty at 500")
+    expectEqual(rawCode(reply(500, "$e11<e:Body/></e:Envelope>")), "http", "no fault at 500")
+    expectEqual(rawCode(reply(200, "$e12<e:Body/></e:Envelope>")), "version_mismatch", "the other version")
+    expectEqual(rawCode(reply(200, "$e11<e:Header><x e:mustUnderstand=\"1\"/></e:Header><e:Body/></e:Envelope>")), "must_understand", "a header it must understand")
+    expectEqual(rawCode(reply(200, "<!DOCTYPE d [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>$e11<e:Body>&x;</e:Body></e:Envelope>")), "xml_dtd_forbidden", "an entity")
+    expectEqual(rawCode("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort"), "truncated", "cut short")
+    expectEqual(rawCode(""), "transport", "nothing")
+    val empty = ping(soapClient(canned(reply(202, "")), "/"))
+    expect(empty.ok() && empty.envelope == null, "202 and nothing, for a one-way call")
+    val failed = ping(soapClient(httpClient("h", { request: string, maximum: int, timeout: int -> HttpTransportResult("", false) }), "/"))
+    expectEqual(errorCode(failed), "transport", "transport")
+    return
+}
+
+// refuses an action that would end the header
+fun case3(): void {
+    seen = []
+    val r = ping(soapClient(canned(reply(200, "")), "/"), "x\"\r\nEvil: 1")
+    expectEqual(errorCode(r), "action", "code")
+    expectEqual(seen.size, 0, "nothing sent")
+    return
+}
+
+// a response too large is refused by its limit
+fun case4(): void {
+    seen = []
+    val huge = "$e11<e:Body>${"x".repeat(5000)}</e:Body></e:Envelope>"
+    val r = ping(soapClient(canned(reply(200, huge)), "/", soap11, [], false, SoapParseOptions(maxBytes = 1000)))
+    expectEqual(errorCode(r), "xml_too_large", "parse limit")
+    return
+}
+
+// the plain profile: digest and text
+fun case5(): void {
+    val fixedNonce = "0123456789abcdef"
+    val digest = WsseUsernameToken("ana", "s3cret", true, { n: int -> fixedNonce }, { 1700000000123 })
+    seen = []
+    val ok = reply(200, "$e11<e:Body/></e:Envelope>")
+    expect(ping(soapClient(canned(ok), "/", soap11, [digest], true)).ok(), "sent")
+    val created = "2023-11-14T22:13:20.123Z"
+    val expected = base64Encode(sha1("$fixedNonce$created" + "s3cret"))
+    expect(seen[0].indexOf("#PasswordDigest\">$expected</wsse:Password>") > 0, "digest of nonce, created and password")
+    expect(seen[0].indexOf(">${base64Encode(fixedNonce)}</wsse:Nonce>") > 0, "nonce")
+    expect(seen[0].indexOf("<wsu:Created>$created</wsu:Created>") > 0, "created")
+    expect(seen[0].indexOf("s3cret") < 0, "not the password")
+
+    val text = WsseUsernameToken("ana", "s<3", false)
+    expect(ping(soapClient(canned(ok), "/", soap11, [text], true)).ok(), "sent")
+    expect(seen[1].indexOf("#PasswordText\">s&lt;3</wsse:Password>") > 0, "text")
+    return
+}
+
+// a security header won't go over a plain connection
+fun case6(): void {
+    seen = []
+    val r = ping(soapClient(canned(reply(200, "")), "/", soap11, [WsseUsernameToken("a", "b")]))
+    expectEqual(errorCode(r), "header", "refused")
+    expectEqual(seen.size, 0, "nothing sent")
+    return
+}
+
+// AT's token, opened with the private key
+fun case7(): void {
+    val key = "K".repeat(16)
+    val token = AtUsernameToken("599999993/37", "testes1234", rsaPublicKeyFromPem(testCertificate), { n: int -> key }, { 1357068030450 })
+    seen = []
+    val ok = reply(200, "$e11<e:Body/></e:Envelope>")
+    expect(ping(soapClient(canned(ok), "/", soap11, [token], true)).ok(), "sent")
+    val sent = seen[0]
+    expect(sent.indexOf("<wss:Security xmlns:wss=\"http://schemas.xmlsoap.org/ws/2002/12/secext\"><wss:UsernameToken><wss:Username>599999993/37</wss:Username><wss:Password>") > 0, "the shape and order in AT's manual")
+    expect(sent.indexOf("testes1234") < 0, "not the password")
+    val secret = aesEcbDecryptPkcs5(key, base64Decode(between(sent, "<wss:Password>", "</wss:Password>")))
+    expectEqual(secret.bytes, "testes1234", "password under the request's key")
+    val created = aesEcbDecryptPkcs5(key, base64Decode(between(sent, "<wss:Created>", "</wss:Created>")))
+    expectEqual(created.bytes, "2013-01-01T19:20:30.450Z", "UTC time in ISO 8601, as in the manual")
+    // Under the public key, in PKCS#1 v1.5: 00 02 ...nonzero... 00 key.
+    val raw = rsaPrivateOperation(rsaPrivateKeyFromPem(testKey), base64Decode(between(sent, "<wss:Nonce>", "</wss:Nonce>")))
+    expect(raw.ok, "opens")
+    expectEqual(raw.bytes.size, 256, "a 2048-bit block")
+    expectEqual(raw.bytes[0], 0, "padding")
+    expectEqual(raw.bytes[1], 2, "padding")
+    expectEqual(raw.bytes[239], 0, "padding's end")
+    expectEqual(raw.bytes.slice(240, 256), key, "the request's key")
+    return
+}
+
+// AT's token is new for each call
+fun case8(): void {
+    val token = atUsernameToken("1/2", "p", testCertificate)
+    seen = []
+    val ok = reply(200, "$e11<e:Body/></e:Envelope>")
+    val client = soapClient(canned(ok), "/", soap11, [token], true)
+    expect(ping(client).ok(), "a")
+    expect(ping(client).ok(), "b")
+    expect(between(seen[0], "<wss:Nonce>", "<") != between(seen[1], "<wss:Nonce>", "<"), "nonce")
+    expect(between(seen[0], "<wss:Password>", "<") != between(seen[1], "<wss:Password>", "<"), "password under a new key")
+    return
+}
+
+// a bad key stops the call
+fun case9(): void {
+    seen = []
+    val r = ping(soapClient(canned(reply(200, "")), "/", soap11, [atUsernameToken("1", "p", "not a key")], true))
+    expectEqual(errorCode(r), "header", "code")
+    expectEqual(seen.size, 0, "nothing sent")
+    val noRandom = AtUsernameToken("1", "p", rsaPublicKeyFromPem(testCertificate), { n: int -> "" }, { 0 })
+    expectEqual(errorCode(ping(soapClient(canned(reply(200, "")), "/", soap11, [noRandom], true))), "header", "no random")
+    return
+}
+
+// URLs
+fun case10(): void {
+    val a = soapParseUrl("https://servicos.portaldasfinancas.gov.pt:722/SeriesWSService?wsdl#x")
+    expect(a.tls, "tls")
+    expectEqual(a.host, "servicos.portaldasfinancas.gov.pt", "host")
+    expectEqual(a.port, 722, "port")
+    expectEqual(a.path, "/SeriesWSService?wsdl", "path")
+    val b = soapParseUrl("http://h")
+    expectEqual(b.port, 80, "default")
+    expectEqual(b.path, "/", "default")
+    for (bad in ["ftp://h/", "http://", "http://u:p@h/", "http://h:x/", "http://h:99999/", "http://h/a b", "http://h/\r\nX: y"]) {
+        expect(soapParseUrl(bad).error != "", "refuses $bad")
+    }
+    return
+}
+
+fun main: int {
+    case0()
+    case1()
+    case2()
+    case3()
+    case4()
+    case5()
+    case6()
+    case7()
+    case8()
+    case9()
+    case10()
+    testsPassed()
+}

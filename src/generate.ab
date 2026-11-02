@@ -1,0 +1,817 @@
+// Typed Abla clients from a WSDL: a class for each complex type, functions that write and read them, and a client class for
+// each SOAP binding, as source text for a file (tools/wsdl2abla) or a generated module (compiler.generateModule).
+export import "wsdl.ab"
+import "envelope.ab"
+import "abla/bytes"
+
+class WsdlGenerateOptions(
+    // Before each name this declares, as two services' types may share them.
+    val prefix: string = "",
+    // Whether the source starts with its imports. A module generated at compile time sees its requester's.
+    val withImports: bool = true,
+    val soapImport: string = "github(\"AndreBaltazar8/abla-soap\")",
+    // Mentioned as a comment on top, along with the tool that made it.
+    val origin: string = ""
+)
+
+class WsdlGenerateResult(val succeeded: bool, val source: string, val error: SoapError?, val notes: array<string>)
+
+class GenType(val kind: string, val abla: string)
+
+class GenField(
+    // element, attribute, any, value
+    val role: string,
+    val ident: string,
+    val local: string,
+    val namespace: string,
+    val type: GenType,
+    val many: bool,
+    val required: bool,
+    val nillable: bool,
+    val written: string
+)
+
+class GenClass(val name: string, val type: XsdType?, val rawFields: array<XsdField>)
+
+class GenOperation(val name: string, val binding: WsdlBindingOperation, val portOperation: WsdlOperation, val version: SoapVersion)
+
+private val genKeywords = ["as", "async", "await", "borrow", "break", "class", "compile", "continue", "defer", "do", "else", "enum", "export", "extern", "false", "for", "fun", "generator", "if", "import", "in", "interface", "is", "move", "noescape", "null", "object", "own", "private", "resource", "return", "sealed", "test", "this", "thread", "trusted", "true", "typealias", "until", "val", "var", "when", "while", "yield", "string", "int", "bool", "void", "array"]
+private val genReservedTypes = ["Map", "Cell", "Shared", "Mutex", "Weak", "Generator", "Task"]
+
+private fun genIsIdent(c: int, first: bool): bool =
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || (!first && c >= 48 && c <= 57)
+
+// Whatever a WSDL names, an Abla identifier: nothing from it reaches the source any other way.
+private fun genSanitize(text: string): string {
+    val out = byteBuffer()
+    var at = 0
+    while (at < text.size) {
+        val c = text[at]
+        if (genIsIdent(c, at == 0)) out.appendByteValue(c)
+        else if (genIsIdent(c, false)) {
+            out.appendByteValue(95)
+            out.appendByteValue(c)
+        } else out.appendByteValue(95)
+        at = at + 1
+    }
+    if (text.size == 0) "_" else out.toText()
+}
+
+private fun genIsLower(c: int): bool = c >= 97 && c <= 122
+private fun genIsUpper(c: int): bool = c >= 65 && c <= 90
+
+private fun genUpperFirst(text: string): string {
+    if (text.size == 0 || !genIsLower(text[0])) return text
+    val out = byteBuffer()
+    out.appendByteValue(text[0] - 32)
+    out.appendText(text.slice(1, text.size))
+    out.toText()
+}
+
+// ATCUD to atcud, ATDocCodeID to atDocCodeID, Line to line.
+private fun genLowerFirst(text: string): string {
+    var run = 0
+    while (run < text.size && genIsUpper(text[run])) run = run + 1
+    if (run == 0) return text
+    val lowered = if (run > 1 && run < text.size && genIsLower(text[run])) run - 1 else run
+    val out = byteBuffer()
+    var at = 0
+    while (at < text.size) {
+        out.appendByteValue(if (at < lowered) text[at] + 32 else text[at])
+        at = at + 1
+    }
+    out.toText()
+}
+
+// An Abla string literal holding exactly this.
+private fun genQuote(text: string): string {
+    val out = byteBuffer()
+    out.appendByteValue(34)
+    for (c in text) {
+        if (c == 34 || c == 92 || c == 36) {
+            out.appendByteValue(92)
+            out.appendByteValue(c)
+        } else if (c == 10) out.appendText("\\n")
+        else if (c == 13) out.appendText("\\r")
+        else if (c == 9) out.appendText("\\t")
+        else if (c < 32 || c == 127) out.appendByteValue(32)
+        else out.appendByteValue(c)
+    }
+    out.appendByteValue(34)
+    out.toText()
+}
+
+private val genDollar = "\$"
+
+private fun genPath(local: string): string {
+    val quoted = genQuote("/$local")
+    "\"$genDollar{path}${quoted.slice(1, quoted.size)}"
+}
+
+class GenRoot(val name: WsdlQName, val type: GenType)
+
+private fun genOperationIn(portType: WsdlPortType, name: string): WsdlOperation? {
+    for (candidate in portType.operations) if (candidate.name == name) return candidate
+    null
+}
+
+class Generator(
+    val definitions: WsdlDefinitions,
+    val options: WsdlGenerateOptions,
+    var out: ByteBuffer,
+    val typesByKey: Map<string, XsdType>,
+    val elementsByKey: Map<string, XsdElement>,
+    val groupsByKey: Map<string, XsdGroup>,
+    val attributeGroupsByKey: Map<string, XsdGroup>,
+    val attributesByKey: Map<string, XsdField>,
+    val messagesByKey: Map<string, WsdlMessage>,
+    val portTypesByKey: Map<string, WsdlPortType>,
+    val classOf: Map<string, string>,
+    val used: Map<string, bool>,
+    val queue: array<GenClass>,
+    val prefixes: Map<string, string>,
+    val prefixList: array<string>,
+    val notes: array<string>,
+    var problem: SoapError?
+) {
+    fun fail(code: string, message: string): void {
+        if (problem == null) problem = SoapError(code, message)
+        return
+    }
+
+    fun line(text: string): void {
+        out.appendText(text)
+        out.appendText("\n")
+        return
+    }
+
+    fun unique(wanted: string): string {
+        var name = wanted
+        var isReserved = name.startsWith("Soap") || name.startsWith("Xml") || name.startsWith("soap") || name.startsWith("xml")
+        for (t in genReservedTypes) if (t == name) isReserved = true
+        for (k in genKeywords) if (k == name) isReserved = true
+        if (isReserved) name = "${name}_"
+        var n = 2
+        var candidate = name
+        while (used.has(candidate)) {
+            candidate = "${name}_$n"
+            n = n + 1
+        }
+        used.set(candidate, true)
+        candidate
+    }
+
+    fun typeName(local: string): string = unique("${options.prefix}${genUpperFirst(genSanitize(local))}")
+
+    fun functionBase(className: string): string = genLowerFirst(className)
+
+    fun prefixOf(namespace: string): string {
+        val known = prefixes.get(namespace)
+        if (known != null) return known
+        val made = if (namespace == definitions.targetNamespace) "tns" else "ns${prefixList.size}"
+        prefixes.set(namespace, made)
+        prefixList.append(namespace)
+        made
+    }
+
+    fun qualified(name: WsdlQName): string {
+        if (name.namespace == "") return name.local
+        if (name.namespace == soapXmlNamespace) return "xml:${name.local}"
+        "${prefixOf(name.namespace)}:${name.local}"
+    }
+
+    // --- Types ---
+
+    fun builtin(local: string): GenType? {
+        if (local == "boolean") return GenType("bool", "bool")
+        if (local == "int" || local == "long" || local == "short" || local == "byte" || local == "unsignedInt" || local == "unsignedShort" || local == "unsignedByte") return GenType("int", "int")
+        // Beyond a long, or exact: text, checked when read. Money doesn't go through a float, and neither does anything else.
+        if (local == "integer" || local == "positiveInteger" || local == "negativeInteger" || local == "nonNegativeInteger" || local == "nonPositiveInteger" || local == "unsignedLong") return GenType("bigint", "string")
+        if (local == "decimal") return GenType("decimal", "string")
+        if (local == "base64Binary") return GenType("base64", "string")
+        if (local == "anyType") return GenType("any", "XmlElement")
+        if (local == "string" || local == "normalizedString" || local == "token" || local == "language" || local == "Name" || local == "NCName" || local == "NMTOKEN" || local == "NMTOKENS" || local == "ID" || local == "IDREF" || local == "IDREFS" || local == "ENTITY" || local == "ENTITIES" || local == "QName" || local == "NOTATION" || local == "anyURI" || local == "date" || local == "dateTime" || local == "time" || local == "duration" || local == "gYear" || local == "gYearMonth" || local == "gMonth" || local == "gMonthDay" || local == "gDay" || local == "hexBinary" || local == "float" || local == "double" || local == "anySimpleType") return GenType("string", "string")
+        null
+    }
+
+    fun simple(t: XsdType, depth: int): GenType {
+        if (t.opaque) return GenType("string", "string")
+        if (depth > 64) {
+            fail("type_cycle", "${t.name.local} is defined by itself")
+            return GenType("string", "string")
+        }
+        val inner = t.inlineBase
+        var base = GenType("string", "string")
+        if (inner != null) base = simple(inner, depth + 1)
+        else {
+            val named = t.base
+            if (named != null) base = resolve(named, depth + 1)
+        }
+        // Digits few enough for a long.
+        if (base.kind == "bigint" && t.totalDigits >= 1 && t.totalDigits <= 18) return GenType("int", "int")
+        base
+    }
+
+    fun resolve(name: WsdlQName, depth: int = 0): GenType {
+        if (name.namespace == xsdNamespace) {
+            val known = builtin(name.local)
+            if (known != null) return known
+            fail("unknown_type", "xsd:${name.local} isn't known")
+            return GenType("string", "string")
+        }
+        val found = typesByKey.get(name.key())
+        if (found == null) {
+            fail("unknown_type", "${name.key()} isn't defined")
+            return GenType("string", "string")
+        }
+        if (!found.complex) return simple(found, depth)
+        val cls = classFor(found, name.key(), name.local)
+        GenType("class", cls)
+    }
+
+    fun classFor(t: XsdType, key: string, local: string): string {
+        val known = classOf.get(key)
+        if (known != null) return known
+        val made = typeName(local)
+        classOf.set(key, made)
+        queue.append(GenClass(made, t, []))
+        made
+    }
+
+    fun inlineType(t: XsdType, owner: string, local: string): GenType {
+        if (!t.complex) return simple(t, 0)
+        val made = unique("$owner${genUpperFirst(genSanitize(local))}")
+        queue.append(GenClass(made, t, []))
+        GenType("class", made)
+    }
+
+    // A type's raw fields, what it extends first, and its simple base if it has content of one.
+    fun flatten(t: XsdType, var fields: array<XsdField>, depth: int): GenType? {
+        if (depth > 64) {
+            fail("type_cycle", "${t.name.local} extends itself")
+            return null
+        }
+        var content: GenType? = null
+        val base = t.base
+        if (base != null && !(base.namespace == xsdNamespace && base.local == "anyType")) {
+            if (base.namespace == xsdNamespace) content = resolve(base)
+            else {
+                val parent = typesByKey.get(base.key())
+                if (parent == null) fail("unknown_type", "${base.key()} isn't defined")
+                else if (!parent.complex) content = simple(parent, 0)
+                else if (!t.restricts) content = flatten(parent, fields, depth + 1)
+                else {
+                    // A restriction keeps what it names; its base gives only a simple content.
+                    val unused: array<XsdField> = []
+                    content = flatten(parent, unused, depth + 1)
+                }
+            }
+        }
+        for (f in t.fields) fields.append(f)
+        content
+    }
+
+    // Groups replaced by what they hold.
+    fun expand(fields: array<XsdField>, var into: array<XsdField>, depth: int): void {
+        if (depth > 64) {
+            fail("group_cycle", "a group holds itself")
+            return
+        }
+        for (f in fields) {
+            if (f.kind == xsdFieldGroup) {
+                val g = groupsByKey.get(f.name.key())
+                if (g == null) fail("unknown_group", "${f.name.key()} isn't defined")
+                else {
+                    val inner: array<XsdField> = []
+                    expand(g.fields, inner, depth + 1)
+                    for (m in inner) into.append(XsdField(m.kind, m.name, m.typeName, m.inline, m.ref,
+                        if (f.minOccurs == 0) 0 else m.minOccurs, if (f.maxOccurs != 1) -1 else m.maxOccurs, m.nillable))
+                }
+            } else if (f.kind == xsdFieldAttributeGroup) {
+                val g = attributeGroupsByKey.get(f.name.key())
+                if (g == null) fail("unknown_group", "${f.name.key()} isn't defined")
+                else expand(g.fields, into, depth + 1)
+            } else into.append(f)
+        }
+        return
+    }
+
+    fun resolvedField(owner: string, f: XsdField, var idents: Map<string, bool>): GenField? {
+        if (f.kind == xsdFieldAny) {
+            return GenField("any", identFor("any", idents), "any", "", GenType("any", "XmlElement"), true, false, false, "")
+        }
+        var name = f.name
+        var named = f.typeName
+        var inline = f.inline
+        var nillable = f.nillable
+        val ref = f.ref
+        if (ref != null) {
+            if (f.kind == xsdFieldElement) {
+                val global = elementsByKey.get(ref.key())
+                if (global == null) {
+                    fail("unknown_element", "${ref.key()} isn't defined")
+                    return null
+                }
+                name = global.name
+                named = global.typeName
+                inline = global.inline
+                nillable = global.nillable
+            } else if (ref.namespace == soapXmlNamespace) {
+                named = WsdlQName(xsdNamespace, "string")
+            } else {
+                val global = attributesByKey.get(ref.key())
+                if (global == null) {
+                    fail("unknown_attribute", "${ref.key()} isn't defined")
+                    return null
+                }
+                named = global.typeName
+                inline = global.inline
+            }
+        }
+        var type = GenType("string", "string")
+        val inlineNow = inline
+        val namedNow = named
+        if (inlineNow != null) type = inlineType(inlineNow, owner, name.local)
+        else if (namedNow != null) type = resolve(namedNow)
+        else if (f.kind == xsdFieldElement) type = GenType("any", "XmlElement")
+        val many = f.maxOccurs != 1
+        val role = if (f.kind == xsdFieldAttribute) "attribute" else "element"
+        GenField(role, identFor(name.local, idents), name.local, name.namespace, type, many, f.minOccurs >= 1, nillable, qualified(name))
+    }
+
+    fun identFor(local: string, var idents: Map<string, bool>): string {
+        var name = genLowerFirst(genSanitize(local))
+        for (k in genKeywords) if (k == name) name = "${name}_"
+        var candidate = name
+        var n = 2
+        while (idents.has(candidate)) {
+            candidate = "${name}_$n"
+            n = n + 1
+        }
+        idents.set(candidate, true)
+        candidate
+    }
+
+    fun fieldsOf(cls: GenClass): array<GenField> {
+        val raw: array<XsdField> = []
+        val t = cls.type
+        val content: GenType? = if (t != null) flatten(t, raw, 0) else null
+        for (f in cls.rawFields) raw.append(f)
+        val expanded: array<XsdField> = []
+        expand(raw, expanded, 0)
+        var idents: Map<string, bool> = Map()
+        val fields: array<GenField> = []
+        // Attributes first, as they must be written first.
+        for (f in expanded) if (f.kind == xsdFieldAttribute) {
+            val r = resolvedField(cls.name, f, idents)
+            if (r != null) fields.append(r)
+        }
+        if (content != null) fields.append(GenField("value", identFor("value", idents), "", "", content, false, true, false, ""))
+        for (f in expanded) if (f.kind != xsdFieldAttribute) {
+            val r = resolvedField(cls.name, f, idents)
+            if (r != null) fields.append(r)
+        }
+        fields
+    }
+
+    fun declaredType(f: GenField): string {
+        if (f.many) return "array<${f.type.abla}>"
+        if (f.required && !f.nillable) f.type.abla else "${f.type.abla}?"
+    }
+
+    fun defaultOf(f: GenField): string {
+        if (f.many) return if (f.required) "" else " = []"
+        if (f.required && !f.nillable) "" else " = null"
+    }
+
+    fun textOf(kind: string, expression: string): string {
+        if (kind == "int") return "\"$genDollar{$expression}\""
+        if (kind == "bool") return "(if ($expression) \"true\" else \"false\")"
+        if (kind == "base64") return "base64Encode($expression)"
+        expression
+    }
+
+    fun writeOne(f: GenField, expression: string, indent: string): void {
+        val q = genQuote(f.written)
+        val kind = f.type.kind
+        if (kind == "class") {
+            line("${indent}w.startElement($q)")
+            line("$indent${functionBase(f.type.abla)}WriteContent(w, $expression)")
+            line("${indent}w.endElement()")
+        } else if (kind == "any") {
+            line("${indent}w.startElement($q)")
+            line("${indent}for (inner in $expression.elements()) xmlWriteElement(w, inner)")
+            line("${indent}w.endElement()")
+        } else {
+            line("${indent}w.element($q, ${textOf(kind, expression)})")
+        }
+        return
+    }
+
+    fun emitClass(index: int): void {
+        val cls = queue[index]
+        val fields = fieldsOf(cls)
+        if (problem != null) return
+        val base = functionBase(cls.name)
+        if (fields.size == 0) line("class ${cls.name}()")
+        else {
+            line("class ${cls.name}(")
+            var at = 0
+            for (f in fields) {
+                at = at + 1
+                line("    val ${f.ident}: ${declaredType(f)}${defaultOf(f)}${if (at < fields.size) "," else ""}")
+            }
+            line(")")
+        }
+        line("")
+        // Writing: the element's own start and end are the caller's.
+        line("fun ${base}WriteContent(var w: XmlWriter, value: ${cls.name}): void {")
+        var n = 0
+        for (f in fields) {
+            n = n + 1
+            val v = "value.${f.ident}"
+            if (f.role == "attribute") {
+                if (f.required) line("    w.attribute(${genQuote(f.written)}, ${textOf(f.type.kind, v)})")
+                else {
+                    line("    val a$n = $v")
+                    line("    if (a$n != null) w.attribute(${genQuote(f.written)}, ${textOf(f.type.kind, "a$n")})")
+                }
+            } else if (f.role == "value") {
+                line("    w.text(${textOf(f.type.kind, v)})")
+            } else if (f.role == "any") {
+                line("    for (inner in $v) xmlWriteElement(w, inner)")
+            } else if (f.many) {
+                line("    for (one in $v) {")
+                writeOne(f, "one", "        ")
+                line("    }")
+            } else if (f.required && !f.nillable) {
+                writeOne(f, v, "    ")
+            } else {
+                line("    val e$n = $v")
+                line("    if (e$n != null) {")
+                writeOne(f, "e$n", "        ")
+                line("    }")
+                if (f.required) {
+                    line("    else {")
+                    line("        w.startElement(${genQuote(f.written)})")
+                    line("        w.namespace(\"xsi\", \"http://www.w3.org/2001/XMLSchema-instance\")")
+                    line("        w.attribute(\"xsi:nil\", \"true\")")
+                    line("        w.endElement()")
+                    line("    }")
+                }
+            }
+        }
+        line("    return")
+        line("}")
+        line("")
+        // Reading.
+        line("fun ${base}Read(var d: SoapDecoder, e: XmlElement, path: string): ${cls.name}? {")
+        n = 0
+        val known: array<string> = []
+        for (f in fields) if (f.role == "element") known.append(f.local)
+        val args: array<string> = []
+        for (f in fields) {
+            n = n + 1
+            val local = genQuote(f.local)
+            val ns = genQuote(f.namespace)
+            val req = if (f.required && !f.nillable) "true" else "false"
+            val p = genPath(f.local)
+            val kind = f.type.kind
+            args.append("${f.ident} = f$n")
+            if (f.role == "any") {
+                val listed = byteBuffer()
+                var first = true
+                for (k in known) {
+                    if (!first) listed.appendText(", ")
+                    first = false
+                    listed.appendText(genQuote(k))
+                }
+                line("    val f$n = soapOthers(e, [${listed.toText()}])")
+            } else if (f.role == "value") {
+                line("    val f$n: ${f.type.abla}? = ${conversion(kind, "e.text()", "path")}")
+                line("    if (f$n == null) return null")
+            } else if (f.role == "attribute") {
+                line("    val t$n = soapAttributeOf(d, e, $local, $ns, $req, $p)")
+                line("    val f$n: ${f.type.abla}? = if (t$n != null) ${conversion(kind, "t$n", p)} else null")
+                if (f.required) line("    if (f$n == null) return null")
+            } else if (f.many) {
+                line("    val f$n: array<${f.type.abla}> = []")
+                line("    for (c in soapChildren(e, $local, $ns)) {")
+                line("        if (!soapIsNil(c)) {")
+                if (kind == "class") line("            val v = ${functionBase(f.type.abla)}Read(d, c, $p)")
+                else if (kind == "any") line("            val v: XmlElement? = c")
+                else line("            val v: ${f.type.abla}? = ${conversion(kind, "c.text()", p)}")
+                line("            if (v != null) f$n.append(v)")
+                line("        }")
+                line("    }")
+                if (f.required) line("    soapAtLeastOne(d, f$n.size, $p)")
+            } else if (kind == "class") {
+                line("    val c$n = soapOne(d, e, $local, $ns, $req, $p)")
+                line("    val f$n: ${f.type.abla}? = if (c$n != null) ${functionBase(f.type.abla)}Read(d, c$n, $p) else null")
+                if (f.required && !f.nillable) line("    if (f$n == null) return null")
+            } else if (kind == "any") {
+                line("    val f$n = soapOne(d, e, $local, $ns, $req, $p)")
+                if (f.required && !f.nillable) line("    if (f$n == null) return null")
+            } else {
+                line("    val t$n = soapTextOf(d, e, $local, $ns, $req, $p)")
+                line("    val f$n: ${f.type.abla}? = if (t$n != null) ${conversion(kind, "t$n", p)} else null")
+                if (f.required && !f.nillable) line("    if (f$n == null) return null")
+            }
+        }
+        val joined = byteBuffer()
+        var first = true
+        for (a in args) {
+            if (!first) joined.appendText(", ")
+            first = false
+            joined.appendText(a)
+        }
+        line("    ${cls.name}(${joined.toText()})")
+        line("}")
+        line("")
+        return
+    }
+
+    fun conversion(kind: string, text: string, p: string): string {
+        if (kind == "int") return "soapParseInt(d, $p, $text)"
+        if (kind == "bool") return "soapParseBool(d, $p, $text)"
+        if (kind == "bigint") return "soapParseBigInteger(d, $p, $text)"
+        if (kind == "decimal") return "soapParseDecimal(d, $p, $text)"
+        if (kind == "base64") return "soapParseBase64(d, $p, $text)"
+        text
+    }
+
+    // --- Operations ---
+
+    // The XML name a body or header goes under and its type; the element for document style.
+    fun elementRoot(name: WsdlQName, label: string): GenRoot? {
+        val global = elementsByKey.get(name.key())
+        if (global == null) {
+            fail("unknown_element", "$label: ${name.key()} isn't defined")
+            return null
+        }
+        val inline = global.inline
+        val named = global.typeName
+        var type = GenType("any", "XmlElement")
+        if (inline != null) {
+            if (!inline.complex) type = simple(inline, 0)
+            else {
+                val key = "element:${name.key()}"
+                val known = classOf.get(key)
+                if (known != null) type = GenType("class", known)
+                else {
+                    val made = typeName(name.local)
+                    classOf.set(key, made)
+                    queue.append(GenClass(made, inline, []))
+                    type = GenType("class", made)
+                }
+            }
+        } else if (named != null) type = resolve(named)
+        GenRoot(name, type)
+    }
+
+    fun rpcRoot(operation: string, local: string, namespace: string, parts: array<WsdlPart>, suffix: string): GenRoot {
+        val fields: array<XsdField> = []
+        for (part in parts) {
+            val partType = part.typeName
+            val element = part.element
+            if (element != null) fields.append(XsdField(xsdFieldElement, element, null, null, element, 1, 1, false))
+            else fields.append(XsdField(xsdFieldElement, WsdlQName("", part.name), partType, null, null, 1, 1, false))
+        }
+        val made = typeName("$operation$suffix")
+        queue.append(GenClass(made, null, fields))
+        GenRoot(WsdlQName(namespace, local), GenType("class", made))
+    }
+
+    fun bodyParts(message: WsdlMessage?, binding: WsdlBodyBinding?): array<WsdlPart> {
+        val parts: array<WsdlPart> = []
+        if (message == null) return parts
+        for (part in message.parts) {
+            var inBody = true
+            if (binding != null) {
+                if (binding.namesParts) {
+                    inBody = false
+                    for (name in binding.parts) if (name == part.name) inBody = true
+                }
+                for (header in binding.headers) {
+                    if (header.part == part.name && header.message.key() == message.name.key()) inBody = false
+                }
+            }
+            if (inBody) parts.append(part)
+        }
+        parts
+    }
+
+    fun messageOf(name: WsdlQName?): WsdlMessage? {
+        if (name == null) return null
+        val found = messagesByKey.get(name.key())
+        if (found == null) fail("unknown_message", "${name.key()} isn't defined")
+        found
+    }
+
+    fun writeRoot(root: GenRoot, expression: string, target: string, declare: string): void {
+        val q = genQuote(qualified(root.name))
+        val kind = root.type.kind
+        line("    $target.startElement($q)")
+        line("    $declare($target)")
+        if (kind == "class") line("    ${functionBase(root.type.abla)}WriteContent($target, $expression)")
+        else if (kind == "any") line("    for (inner in $expression.elements()) xmlWriteElement($target, inner)")
+        else line("    $target.text(${textOf(kind, expression)})")
+        line("    $target.endElement()")
+        return
+    }
+
+    fun emitOperation(client: string, method: string, binding: WsdlBinding, op: WsdlBindingOperation, port: WsdlOperation, declare: string): void {
+        val inputUse = op.input
+        val outputUse = op.output
+        if ((inputUse != null && inputUse.use != "literal") || (outputUse != null && outputUse.use != "literal")) {
+            notes.append("${binding.name.local}.${op.name} is encoded, not literal: left out")
+            return
+        }
+        val rpc = op.style == "rpc"
+        val inputMessage = messageOf(port.input)
+        val outputMessage = messageOf(port.output)
+        val inParts = bodyParts(inputMessage, inputUse)
+        val outParts = bodyParts(outputMessage, outputUse)
+        if (!rpc && (inParts.size > 1 || outParts.size > 1)) {
+            notes.append("${binding.name.local}.${op.name} has several parts in a document body: left out")
+            return
+        }
+        val inNamespace = if (inputUse != null && inputUse.namespace != "") inputUse.namespace else definitions.targetNamespace
+        val outNamespace = if (outputUse != null && outputUse.namespace != "") outputUse.namespace else definitions.targetNamespace
+        val inRoot: GenRoot? =
+            if (rpc) rpcRoot(op.name, op.name, inNamespace, inParts, "Request")
+            else if (inParts.size == 1) partRoot(inParts[0], "${op.name} input")
+            else null
+        val outRoot: GenRoot? =
+            if (rpc && outputMessage != null) rpcRoot(op.name, "", outNamespace, outParts, "Response")
+            else if (!rpc && outParts.size == 1) partRoot(outParts[0], "${op.name} output")
+            else null
+        if (problem != null) return
+        val params: array<string> = []
+        if (inRoot != null) params.append("request: ${inRoot.type.abla}")
+        // Headers the operation names, after the body.
+        val headerRoots: array<GenRoot> = []
+        if (inputUse != null) {
+            for (header in inputUse.headers) {
+                val message = messageOf(header.message)
+                if (message != null) {
+                    for (part in message.parts) {
+                        if (part.name == header.part) {
+                            val root = partRoot(part, "${op.name} header")
+                            if (root != null) {
+                                params.append("header${headerRoots.size}: ${root.type.abla}")
+                                headerRoots.append(root)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val joined = byteBuffer()
+        var first = true
+        for (p in params) {
+            if (!first) joined.appendText(", ")
+            first = false
+            joined.appendText(p)
+        }
+        val result = if (outRoot != null) outRoot.type.abla else "SoapEmpty"
+        line("fun $client.$method(${joined.toText()}): SoapCall<$result> {")
+        line("    var out = this.soap.begin()")
+        var h = 0
+        for (root in headerRoots) {
+            writeRoot(root, "header$h", "out.writer.xml", declare)
+            h = h + 1
+        }
+        line("    out.body()")
+        if (inRoot != null) writeRoot(inRoot, "request", "out.writer.xml", declare)
+        line("    val response = this.soap.send(${genQuote(op.action)}, out)")
+        line("    if (!response.ok()) return soapCallFailed<$result>(response)")
+        line("    var d = soapDecoder()")
+        if (outRoot == null) {
+            line("    SoapCall<SoapEmpty>(SoapEmpty(), response, d)")
+        } else {
+            val local = genQuote(outRoot.name.local)
+            line("    val e = soapExpect(d, response.envelope, $local)")
+            val kind = outRoot.type.kind
+            if (kind == "class") line("    val v = if (e != null) ${functionBase(outRoot.type.abla)}Read(d, e, $local) else null")
+            else if (kind == "any") line("    val v: XmlElement? = e")
+            else line("    val v: ${outRoot.type.abla}? = if (e != null) ${conversion(kind, "e.text()", local)} else null")
+            line("    SoapCall<$result>(v, response, d)")
+        }
+        line("}")
+        line("")
+        return
+    }
+
+    fun partRoot(part: WsdlPart, label: string): GenRoot? {
+        val element = part.element
+        if (element != null) return elementRoot(element, label)
+        val named = part.typeName
+        if (named != null) return GenRoot(WsdlQName("", part.name), resolve(named))
+        fail("empty_part", "$label: ${part.name} has neither element nor type")
+        null
+    }
+
+    fun emitBinding(binding: WsdlBinding, declare: string): void {
+        val portType = portTypesByKey.get(binding.portType.key())
+        if (portType == null) {
+            fail("unknown_port_type", "${binding.portType.key()} isn't defined")
+            return
+        }
+        val client = typeName("${binding.name.local}Client")
+        val version = if (binding.version.name == "1.1") "soap11" else "soap12"
+        line("class $client(val soap: SoapClient)")
+        line("val ${functionBase(client)}Version = $version")
+        line("")
+        var methods: Map<string, bool> = Map()
+        for (op in binding.operations) {
+            val port = genOperationIn(portType, op.name)
+            if (port == null) fail("unknown_operation", "${op.name} isn't in ${portType.name.local}")
+            else emitOperation(client, identFor(op.name, methods), binding, op, port, declare)
+        }
+        return
+    }
+
+    fun emitEnumerations(): void {
+        for (t in definitions.types) {
+            if (!t.complex && t.enumeration.size > 0) {
+                val owner = typeName(t.name.local)
+                var n = 0
+                for (v in t.enumeration) {
+                    line("val ${unique("${owner}_${genSanitize(v)}")} = ${genQuote(v)}")
+                    n = n + 1
+                }
+                line("")
+            }
+        }
+        return
+    }
+
+    fun run(): void {
+        line("// Generated by abla-soap from a WSDL. Don't edit; generate it again.")
+        if (options.origin != "") line("// From ${genSanitizeComment(options.origin)}")
+        line("")
+        if (options.withImports) {
+            line("import ${options.soapImport}")
+            line("import \"abla/crypto\"")
+            line("")
+        }
+        val declare = unique("${genLowerFirst(options.prefix)}DeclareNamespaces")
+        emitEnumerations()
+        for (binding in definitions.bindings) emitBinding(binding, declare)
+        for (service in definitions.services) {
+            for (port in service.ports) {
+                line("val ${unique("${genLowerFirst(options.prefix)}${genUpperFirst(genSanitize(service.name))}${genUpperFirst(genSanitize(port.name))}Location")} = ${genQuote(port.location)}")
+            }
+        }
+        line("")
+        // Every named type, for details of faults and whatever else comes loose.
+        for (t in definitions.types) if (t.complex) classFor(t, t.name.key(), t.name.local)
+        for (e in definitions.elements) if (e.inline != null) elementRoot(e.name, "element")
+        var at = 0
+        while (at < queue.size && problem == null) {
+            emitClass(at)
+            at = at + 1
+        }
+        line("fun $declare(var w: XmlWriter): void {")
+        var n = 0
+        while (n < prefixList.size) {
+            val namespace = prefixList[n]
+            line("    w.namespace(${genQuote(prefixOf(namespace))}, ${genQuote(namespace)})")
+            n = n + 1
+        }
+        line("    return")
+        line("}")
+        return
+    }
+}
+
+private fun genSanitizeComment(text: string): string {
+    val out = byteBuffer()
+    for (c in text) out.appendByteValue(if (c < 32 || c == 127) 32 else c)
+    out.toText()
+}
+
+fun wsdlGenerate(definitions: WsdlDefinitions, options: WsdlGenerateOptions = WsdlGenerateOptions()): WsdlGenerateResult {
+    var g0 = Generator(definitions, options, byteBuffer(), Map(), Map(), Map(), Map(), Map(), Map(), Map(), Map(), Map(), [], Map(), [], [], null)
+    for (t in definitions.types) g0.typesByKey.set(t.name.key(), t)
+    for (e in definitions.elements) g0.elementsByKey.set(e.name.key(), e)
+    for (g in definitions.groups) g0.groupsByKey.set(g.name.key(), g)
+    for (g in definitions.attributeGroups) g0.attributeGroupsByKey.set(g.name.key(), g)
+    for (a in definitions.globalAttributes) g0.attributesByKey.set(a.name.key(), a)
+    for (m in definitions.messages) g0.messagesByKey.set(m.name.key(), m)
+    for (p in definitions.portTypes) g0.portTypesByKey.set(p.name.key(), p)
+    g0.run()
+    val problem = g0.problem
+    if (problem != null) return WsdlGenerateResult(false, "", problem, g0.notes)
+    for (n in definitions.notes) g0.notes.append(n)
+    WsdlGenerateResult(true, g0.out.toText(), null, g0.notes)
+}
+
+// From the WSDL's bytes, for the common case.
+fun wsdlGenerateFrom(source: string, options: WsdlGenerateOptions = WsdlGenerateOptions(), resolver: WsdlResolver = WsdlNoImports(), limits: WsdlOptions = WsdlOptions()): WsdlGenerateResult {
+    val parsed = wsdlParse(source, resolver, limits)
+    val definitions = parsed.definitions
+    if (definitions == null) return WsdlGenerateResult(false, "", parsed.error, [])
+    wsdlGenerate(definitions, options)
+}

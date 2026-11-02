@@ -1,0 +1,102 @@
+// AT's series and transport services against tests/at/mock_at.py: clients generated from AT's WSDLs, mutual TLS and AT's token.
+import "../../build/gen/at_series.ab"
+import "../../build/gen/at_transporte.ab"
+import "../../src/tls.ab"
+import "abla/fs"
+import "abla/test"
+import "abla/process"
+
+fun token(password: string, directory: string): array<SoapHeaderSource> {
+    val headers: array<SoapHeaderSource> = []
+    headers.append(atUsernameToken("599999993/37", password, Path("$directory/at.crt").readText()))
+    headers
+}
+
+fun tlsClient(url: string, directory: string): SoapClient? =
+    soapMutualTlsClientPem(url, Path("$directory/client.crt").readText(), Path("$directory/client.key").readText(), "",
+        SoapTlsOptions(headers = token("testes1234", directory), caPath = "$directory/ca.crt")).client
+
+fun request(type: string): AtSeriesRegistarSerie = AtSeriesRegistarSerie(
+    serie = "A", tipoSerie = "N", classeDoc = "SI", tipoDoc = type, numInicialSeq = "1",
+    dataInicioPrevUtiliz = "2026-11-02", numCertSWFatur = 9999, meioProcessamento = "PI"
+)
+
+fun main: int {
+    val directory = processArgument(0)
+    val url = "https://localhost:${processArgument(1)}"
+    val soap = tlsClient("$url/SeriesWSService", directory)
+    expect(soap != null, "a client")
+    if (soap != null) {
+        val series = AtSeriesSeriesWSPortBindingClient(soap)
+        val call = series.registarSerie(request("FT"))
+        expect(call.ok(), "registered: ${call.problem()}")
+        val v = call.value
+        if (v != null) {
+            val info = v.registarSerieResp.infoSerie
+            expectEqual(if (info != null) info.codValidacaoSerie else "", "AAJFJ3K5", "the validation code")
+            expectEqual(v.registarSerieResp.infoResultOper.codResultOper, 2001, "the result")
+        }
+        // AT's refusals come in a result, not a fault; they are for the caller to read.
+        val refused = series.registarSerie(request("XX"))
+        expect(refused.ok(), "an answer: ${refused.problem()}")
+        val r = refused.value
+        if (r != null) {
+            expectEqual(r.registarSerieResp.infoResultOper.codResultOper, 4046, "the code")
+            expectEqual(r.registarSerieResp.infoResultOper.msgResultOper, "Tipo inválido", "the message")
+        }
+    }
+    val second = tlsClient("$url/documentosTransporte", directory)
+    if (second != null) {
+        val transport = AtTransporteDocumentosTransporteSOAPClient(second)
+        val address = AtTransporteAddressStructurePT(addressdetail = "Rua", city = "Porto", postalCode = "4000-001", country = "PT")
+        val call = transport.envioDocumentoTransporte(AtTransporteStockMovement(
+            taxRegistrationNumber = "599999993", companyName = "X", companyAddress = address, documentNumber = "GT A/1",
+            movementStatus = "N", movementDate = "2026-11-02", movementType = "GT", addressFrom = address,
+            movementStartTime = "2026-11-02T10:00:00",
+            line = [AtTransporteLine(productDescription = "P", quantity = "1", unitOfMeasure = "UN", unitPrice = "0")]
+        ))
+        expect(call.ok(), "a transport document: ${call.problem()}")
+        val v = call.value
+        expectEqual(if (v != null) v.responseStatus[0].returnCode else "", "0", "the return code")
+    }
+    // The same identity from a PKCS#12 container, as AT's manual has it.
+    val pfx = soapMutualTlsClientPkcs12("$url/SeriesWSService", Path("$directory/client.pfx").readText(), "pfx-pass",
+        SoapTlsOptions(headers = token("testes1234", directory), caPath = "$directory/ca.crt")).client
+    expect(pfx != null, "a client from a .pfx")
+    if (pfx != null) {
+        val call = AtSeriesSeriesWSPortBindingClient(pfx).registarSerie(request("FT"))
+        expect(call.ok(), "over a .pfx: ${call.problem()}")
+    }
+    // Plain http, with a token that needs TLS, doesn't go at all, and another scheme isn't a client.
+    expect(soapHttpsClient("http://localhost:1/").client == null, "not https")
+    expect(soapMutualTlsClientPem("ftp://x/", "c", "k").client == null, "not a URL for this")
+    // No client certificate: the server's TLS refuses, under 1.3 on the first read.
+    val none = soapHttpsClient("$url/SeriesWSService", SoapTlsOptions(headers = token("testes1234", directory), caPath = "$directory/ca.crt")).client
+    if (none != null) {
+        val call = AtSeriesSeriesWSPortBindingClient(none).registarSerie(request("FT"))
+        expect(!call.ok(), "no certificate is refused")
+    }
+    // The wrong password is AT's to refuse, and comes as a fault.
+    val wrong = soapMutualTlsClientPem("$url/SeriesWSService", Path("$directory/client.crt").readText(), Path("$directory/client.key").readText(), "",
+        SoapTlsOptions(headers = token("nope", directory), caPath = "$directory/ca.crt")).client
+    if (wrong != null) {
+        val call = AtSeriesSeriesWSPortBindingClient(wrong).registarSerie(request("FT"))
+        val fault = call.fault()
+        expect(fault != null && fault.message == "Authentication failed" && fault.blamesSender(), "the wrong password: ${call.problem()}")
+    }
+    // A certificate not under the CA: TLS itself refuses.
+    val bare = soapMutualTlsClientPem("$url/SeriesWSService", Path("$directory/other.crt").readText(), Path("$directory/other.key").readText(), "",
+        SoapTlsOptions(headers = token("testes1234", directory), caPath = "$directory/ca.crt")).client
+    if (bare != null) {
+        val call = AtSeriesSeriesWSPortBindingClient(bare).registarSerie(request("FT"))
+        expect(!call.ok(), "a certificate the server doesn't trust is refused")
+    }
+    // A server not under the given CA isn't talked to: the system's list doesn't have it.
+    val noCa = soapMutualTlsClientPem("$url/SeriesWSService", Path("$directory/client.crt").readText(), Path("$directory/client.key").readText(), "",
+        SoapTlsOptions(headers = token("testes1234", directory))).client
+    if (noCa != null) {
+        val call = AtSeriesSeriesWSPortBindingClient(noCa).registarSerie(request("FT"))
+        expect(!call.ok(), "an unknown server is refused")
+    }
+    testsPassed()
+}

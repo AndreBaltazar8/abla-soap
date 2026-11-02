@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: AndreBaltazar8/setup-abla@b21e1290aa49862e7bf187dc84b6b3511f4b571e # v1.0.0
+        with:
+          version: '0.2.29'
+      - name: Envelopes, faults, WS-Security, WSDL and generated clients
+        run: make test COMPILER=ablac
+      - name: Install OpenSSL's libraries
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: AT's WSDLs against a local mutual-TLS server
+        run: make at COMPILER=ablac WITH_OPENSSL=

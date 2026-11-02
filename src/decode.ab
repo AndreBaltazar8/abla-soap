@@ -1,0 +1,206 @@
+// What generated clients read with: a tree into typed values, with the problems noted and not thrown. Elements are matched
+// by namespace, and then by local name alone, as servers aren't always faithful to their own form attributes.
+export import "envelope.ab"
+import "abla/crypto"
+import "abla/bytes"
+
+class SoapDecodeProblem(val path: string, val message: string)
+
+class SoapDecoder(val problems: array<SoapDecodeProblem>) {
+    fun problem(path: string, message: string): void {
+        // A hostile document can't grow this beyond what it would take to explain it.
+        if (problems.size < 64) problems.append(SoapDecodeProblem(path, message))
+        return
+    }
+
+    fun ok(): bool = problems.size == 0
+
+    fun summary(): string {
+        var text = ""
+        for (p in problems) text = if (text == "") "${p.path}: ${p.message}" else "$text; ${p.path}: ${p.message}"
+        text
+    }
+}
+
+fun soapDecoder(): SoapDecoder = SoapDecoder([])
+
+// Nothing returned: the value of a call whose response carries no body.
+class SoapEmpty()
+
+fun soapChild(element: XmlElement, local: string, namespace: string): XmlElement? {
+    val exact = element.child(local, namespace)
+    if (exact != null) exact else element.child(local)
+}
+
+fun soapChildren(element: XmlElement, local: string, namespace: string): array<XmlElement> {
+    val exact = element.elements(local, namespace)
+    if (exact.size > 0) exact else element.elements(local)
+}
+
+// Whether xsi:nil says this element has no value.
+fun soapIsNil(element: XmlElement): bool {
+    val nil = element.attributeValue("nil", "", "http://www.w3.org/2001/XMLSchema-instance").trim()
+    nil == "true" || nil == "1"
+}
+
+private fun soapDecimalDigits(text: string, begin: int): bool {
+    if (begin >= text.size) return false
+    var at = begin
+    while (at < text.size) {
+        val c = text[at]
+        if (c < 48 || c > 57) return false
+        at = at + 1
+    }
+    true
+}
+
+fun soapIsInteger(text: string): bool {
+    val start = if (text.size > 0 && (text[0] == 45 || text[0] == 43)) 1 else 0
+    soapDecimalDigits(text, start)
+}
+
+// An xsd:decimal's lexical form. Kept as text, as nothing here puts money through a float.
+fun soapIsDecimal(text: string): bool {
+    var at = if (text.size > 0 && (text[0] == 45 || text[0] == 43)) 1 else 0
+    var digits = 0
+    var dots = 0
+    while (at < text.size) {
+        val c = text[at]
+        if (c == 46) dots = dots + 1
+        else if (c < 48 || c > 57) return false
+        else digits = digits + 1
+        at = at + 1
+    }
+    digits > 0 && dots <= 1
+}
+
+// xsd:long and what fits in it, or null with a problem noted.
+fun soapParseInt(var d: SoapDecoder, path: string, source: string): int? {
+    val text = source.trim()
+    val negative = text.size > 0 && text[0] == 45
+    val start = if (negative || (text.size > 0 && text[0] == 43)) 1 else 0
+    if (!soapDecimalDigits(text, start)) {
+        d.problem(path, "not an integer")
+        return null
+    }
+    var value = 0
+    var at = start
+    while (at < text.size) {
+        val digit = text[at] - 48
+        // Worked negatively, as the most negative long has no positive.
+        if (value < (-9223372036854775807 - 1 + digit) / 10) {
+            d.problem(path, "out of range")
+            return null
+        }
+        value = value * 10 - digit
+        at = at + 1
+    }
+    if (negative) return value
+    if (value == -9223372036854775807 - 1) {
+        d.problem(path, "out of range")
+        return null
+    }
+    -value
+}
+
+fun soapParseBool(var d: SoapDecoder, path: string, source: string): bool? {
+    val text = source.trim()
+    if (text == "true" || text == "1") return true
+    if (text == "false" || text == "0") return false
+    d.problem(path, "not a boolean")
+    null
+}
+
+// Lexical checks for what stays text: an xsd:integer of any size, or an xsd:decimal.
+fun soapParseBigInteger(var d: SoapDecoder, path: string, source: string): string? {
+    val text = source.trim()
+    if (soapIsInteger(text)) return text
+    d.problem(path, "not an integer")
+    null
+}
+
+fun soapParseDecimal(var d: SoapDecoder, path: string, source: string): string? {
+    val text = source.trim()
+    if (soapIsDecimal(text)) return text
+    d.problem(path, "not a decimal")
+    null
+}
+
+fun soapParseBase64(var d: SoapDecoder, path: string, source: string): string? {
+    val compact = byteBuffer()
+    for (c in source) if (c != 32 && c != 9 && c != 10 && c != 13) compact.appendByteValue(c)
+    val text = compact.toText()
+    // base64Decode gives "" for what it can't read.
+    val decoded = base64Decode(text)
+    if (text != "" && decoded == "") {
+        d.problem(path, "not base64")
+        return null
+    }
+    decoded
+}
+
+fun soapMissing(var d: SoapDecoder, path: string): void {
+    d.problem(path, "missing")
+    return
+}
+
+// A child that's there and isn't nil. A required one that isn't there is a problem; one that's nil is for the caller's type to
+// have allowed, which it did, as only a nillable element is read with `required` off.
+fun soapOne(var d: SoapDecoder, parent: XmlElement, local: string, namespace: string, required: bool, path: string): XmlElement? {
+    val found = soapChild(parent, local, namespace)
+    if (found == null) {
+        if (required) d.problem(path, "missing")
+        return null
+    }
+    if (soapIsNil(found)) {
+        if (required) d.problem(path, "nil, and not nillable")
+        return null
+    }
+    found
+}
+
+fun soapTextOf(var d: SoapDecoder, parent: XmlElement, local: string, namespace: string, required: bool, path: string): string? {
+    val found = soapOne(d, parent, local, namespace, required, path)
+    if (found != null) found.text() else null
+}
+
+fun soapAttributeOf(var d: SoapDecoder, element: XmlElement, local: string, namespace: string, required: bool, path: string): string? {
+    val found = element.attribute(local, namespace)
+    if (found != null) return found.value
+    if (required) d.problem(path, "missing")
+    null
+}
+
+fun soapAtLeastOne(var d: SoapDecoder, count: int, path: string): void {
+    if (count == 0) d.problem(path, "missing")
+    return
+}
+
+// Child elements that aren't in `known`: what an xs:any holds.
+fun soapOthers(element: XmlElement, known: array<string>): array<XmlElement> {
+    val others: array<XmlElement> = []
+    for (child in element.elements()) {
+        var isKnown = false
+        for (name in known) if (name == child.localName) isKnown = true
+        if (!isKnown) others.append(child)
+    }
+    others
+}
+
+// The one thing a response's body should hold: `local` in `namespace`, or anything if `local` is "".
+fun soapExpect(var d: SoapDecoder, envelope: SoapEnvelope?, local: string): XmlElement? {
+    if (envelope == null) {
+        d.problem("Body", "no response body")
+        return null
+    }
+    val found = envelope.content()
+    if (found == null) {
+        d.problem("Body", "empty")
+        return null
+    }
+    if (local != "" && found.localName != local) {
+        d.problem("Body", "expected $local, got ${found.name}")
+        return null
+    }
+    found
+}

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Names meant to break out of generated source. tests/wsdl_test.ab has the same; this one is also compiled. -->
+<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t">
+  <types>
+    <x:schema targetNamespace="urn:t">
+      <x:element name="class"><x:complexType><x:sequence>
+        <x:element name='x");evil();//${boom}\' type="x:string"/>
+        <x:element name="fun" type="x:int"/>
+        <x:element name="val" type="x:string" minOccurs="0"/>
+        <x:element name="until" type="t:Map"/>
+        <x:element name="a-b" type="x:string"/>
+        <x:element name="a.b" type="x:string"/>
+        <x:element name="ação" type="x:string"/>
+      </x:sequence></x:complexType></x:element>
+      <x:complexType name="Map"><x:sequence><x:element name="string" type="x:string"/></x:sequence></x:complexType>
+      <x:complexType name="SoapClient"><x:sequence><x:element name="this" type="x:string"/></x:sequence></x:complexType>
+      <x:simpleType name="En"><x:restriction base="x:string"><x:enumeration value='a");evil();//'/><x:enumeration value="$"/><x:enumeration value="\"/></x:restriction></x:simpleType>
+    </x:schema>
+  </types>
+  <message name="m"><part name="p" element="t:class"/></message>
+  <portType name="P"><operation name="return"><input message="t:m"/><output message="t:m"/></operation></portType>
+  <binding name='B");evil();//' type="t:P">
+    <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="return"><s:operation soapAction='x");evil();//${boom}\'/><input><s:body use="literal"/></input><output><s:body use="literal"/></output></operation>
+  </binding>
+  <service name="S"><port name="p" binding='t:B");evil();//'><s:address location='http://x/");evil();//${boom}'/></port></service>
+</definitions>

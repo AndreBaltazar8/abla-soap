@@ -1,0 +1,6 @@
+// SOAP 1.1 and 1.2 clients: envelopes, faults and WS-Security. What's in "abla-soap/wsdl" and "abla-soap/generate" builds
+// clients and isn't needed to run one; TLS is "abla-soap/tls".
+export import "envelope.ab"
+export import "decode.ab"
+export import "client.ab"
+export import "wssecurity.ab"

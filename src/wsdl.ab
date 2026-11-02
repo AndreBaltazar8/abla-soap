@@ -1,0 +1,589 @@
+// WSDL 1.1 and the XML Schema inside it, read into a model for the generator. A bounded reader: no DOCTYPE, no entity, and
+// nothing fetched. An import is read only through the resolver it's given, and by default there is none.
+import "envelope.ab"
+
+val wsdlNamespace = "http://schemas.xmlsoap.org/wsdl/"
+val wsdl20Namespace = "http://www.w3.org/ns/wsdl"
+val wsdlSoap11Namespace = "http://schemas.xmlsoap.org/wsdl/soap/"
+val wsdlSoap12Namespace = "http://schemas.xmlsoap.org/wsdl/soap12/"
+val xsdNamespace = "http://www.w3.org/2001/XMLSchema"
+
+class WsdlQName(val namespace: string, val local: string) {
+    fun key(): string = "{$namespace}$local"
+}
+
+// What goes in a class: 0 an element, 1 an attribute, 2 xs:any, 3 a group's reference, 4 an attributeGroup's reference.
+val xsdFieldElement = 0
+val xsdFieldAttribute = 1
+val xsdFieldAny = 2
+val xsdFieldGroup = 3
+val xsdFieldAttributeGroup = 4
+
+class XsdField(
+    val kind: int,
+    // The element's or attribute's name; namespace "" when unqualified.
+    val name: WsdlQName,
+    // Its type, or null when `inline` holds one, or it's a `ref`.
+    val typeName: WsdlQName?,
+    val inline: XsdType?,
+    val ref: WsdlQName?,
+    val minOccurs: int,
+    // -1 unbounded.
+    val maxOccurs: int,
+    val nillable: bool
+)
+
+class XsdType(
+    val name: WsdlQName,
+    val complex: bool,
+    // A simple type's base, or a complex type's extension or restriction.
+    val base: WsdlQName?,
+    val fields: array<XsdField>,
+    val enumeration: array<string>,
+    // 0 when not given.
+    val totalDigits: int,
+    // A list or union: text, whatever its parts.
+    val opaque: bool,
+    // complexContent or simpleContent with a restriction, which keeps only what it names.
+    val restricts: bool,
+    val inlineBase: XsdType?
+)
+
+class XsdElement(val name: WsdlQName, val typeName: WsdlQName?, val inline: XsdType?, val nillable: bool)
+
+class XsdGroup(val name: WsdlQName, val fields: array<XsdField>)
+
+class WsdlPart(val name: string, val element: WsdlQName?, val typeName: WsdlQName?)
+class WsdlMessage(val name: WsdlQName, val parts: array<WsdlPart>)
+class WsdlOperation(val name: string, val input: WsdlQName?, val output: WsdlQName?, val faults: array<WsdlQName>)
+class WsdlPortType(val name: WsdlQName, val operations: array<WsdlOperation>)
+class WsdlHeaderRef(val message: WsdlQName, val part: string)
+
+// One direction of an operation's binding. Without `namesParts`, soap:body didn't say, which means all of them.
+class WsdlBodyBinding(val use: string, val namespace: string, val namesParts: bool, val parts: array<string>, val headers: array<WsdlHeaderRef>)
+
+class WsdlBindingOperation(
+    val name: string,
+    val action: string,
+    val style: string,
+    val input: WsdlBodyBinding?,
+    val output: WsdlBodyBinding?
+)
+
+class WsdlBinding(
+    val name: WsdlQName,
+    val portType: WsdlQName,
+    val version: SoapVersion,
+    val style: string,
+    val operations: array<WsdlBindingOperation>
+)
+
+class WsdlPort(val name: string, val binding: WsdlQName, val location: string)
+class WsdlService(val name: string, val ports: array<WsdlPort>)
+
+class WsdlDefinitions(
+    val name: string,
+    val targetNamespace: string,
+    val elements: array<XsdElement>,
+    val types: array<XsdType>,
+    val groups: array<XsdGroup>,
+    val attributeGroups: array<XsdGroup>,
+    val globalAttributes: array<XsdField>,
+    val messages: array<WsdlMessage>,
+    val portTypes: array<WsdlPortType>,
+    val bindings: array<WsdlBinding>,
+    val services: array<WsdlService>,
+    // What was read and left out, and why.
+    val notes: array<string>
+)
+
+class WsdlParseResult(val succeeded: bool, val definitions: WsdlDefinitions?, val error: SoapError?)
+
+// How an import's location becomes bytes: null refuses it, which fails the parse. Nothing else is read.
+interface WsdlResolver {
+    fun read(location: string): string?
+}
+
+class WsdlNoImports() : WsdlResolver {
+    fun read(location: string): string? = null
+}
+
+class WsdlOptions(
+    val maxBytes: int = 8388608,
+    val maxDepth: int = 128,
+    val maxNodes: int = 1048576,
+    val maxDocuments: int = 32
+)
+
+private fun wsdlIsSpace(c: int): bool = c == 32 || c == 9 || c == 10 || c == 13
+
+private fun wsdlOccurs(text: string, fallback: int): int {
+    val value = text.trim()
+    if (value == "") return fallback
+    if (value == "unbounded") return -1
+    var n = 0
+    if (value.size > 9) return -2
+    for (c in value) {
+        if (c < 48 || c > 57) return -2
+        n = n * 10 + c - 48
+    }
+    n
+}
+
+private fun wsdlWords(text: string): array<string> {
+    val names: array<string> = []
+    var start = 0
+    var at = 0
+    while (at <= text.size) {
+        if (at == text.size || wsdlIsSpace(text[at])) {
+            if (at > start) names.append(text.slice(start, at))
+            start = at + 1
+        }
+        at = at + 1
+    }
+    names
+}
+
+class WsdlReader(
+    val resolver: WsdlResolver,
+    val options: WsdlOptions,
+    val seen: array<string>,
+    val scope: array<XmlElement>,
+    var problem: SoapError?,
+    var anonymous: int,
+    val elements: array<XsdElement>,
+    val types: array<XsdType>,
+    val groups: array<XsdGroup>,
+    val attributeGroups: array<XsdGroup>,
+    val globalAttributes: array<XsdField>,
+    val messages: array<WsdlMessage>,
+    val portTypes: array<WsdlPortType>,
+    val bindings: array<WsdlBinding>,
+    val services: array<WsdlService>,
+    val notes: array<string>,
+    var name: string,
+    var targetNamespace: string
+) {
+    fun fail(code: string, message: string): void {
+        if (problem == null) problem = SoapError(code, message)
+        return
+    }
+
+    fun failedAlready(): bool = problem != null
+
+    // A QName in an attribute, by the prefixes in scope where it's written.
+    fun qname(text: string, at: XmlElement): WsdlQName {
+        val value = text.trim()
+        val colon = value.indexOf(":")
+        if (colon < 0) return WsdlQName(soapLookupPrefix("", at, scope), value)
+        val prefix = value.slice(0, colon)
+        val namespace = soapLookupPrefix(prefix, at, scope)
+        if (namespace == "") fail("unknown_prefix", "the prefix '$prefix' at line ${at.line} isn't declared")
+        WsdlQName(namespace, value.slice(colon + 1, value.size))
+    }
+
+    fun optionalQName(element: XmlElement, attribute: string): WsdlQName? {
+        val value = element.attributeValue(attribute)
+        if (value == "") null else qname(value, element)
+    }
+
+    fun readDocument(source: string, location: string): XmlElement? {
+        if (seen.size >= options.maxDocuments) {
+            fail("too_many_documents", "more than ${options.maxDocuments} documents")
+            return null
+        }
+        // A byte order mark, which an XML parser may take and this one needn't.
+        var text = source
+        if (text.size >= 3 && text[0] == 239 && text[1] == 187 && text[2] == 191) text = text.slice(3, text.size)
+        val parsed = xmlParse(text, XmlOptions(maxBytes = options.maxBytes, maxDepth = options.maxDepth, maxNodes = options.maxNodes, allowDtd = false))
+        val trouble = parsed.error
+        if (trouble != null) {
+            fail("xml_${trouble.code}", "$location, line ${trouble.line}: ${trouble.message}")
+            return null
+        }
+        val document = parsed.document
+        if (document == null) return null
+        document.root
+    }
+
+    fun readImported(location: string): XmlElement? {
+        for (done in seen) if (done == location) return null
+        seen.append(location)
+        val bytes = resolver.read(location)
+        if (bytes == null) {
+            fail("import_refused", "nothing may read '$location'; pass a resolver to read imports")
+            return null
+        }
+        readDocument(bytes, location)
+    }
+
+    // --- XML Schema ---
+
+    fun schema(element: XmlElement): void {
+        val target = element.attributeValue("targetNamespace")
+        val qualified = element.attributeValue("elementFormDefault") == "qualified"
+        val attributesQualified = element.attributeValue("attributeFormDefault") == "qualified"
+        schemaWith(element, target, qualified, attributesQualified)
+        return
+    }
+
+    fun schemaWith(element: XmlElement, target: string, qualified: bool, attributesQualified: bool): void {
+        scope.append(element)
+        for (child in element.elements(xmlAnyNamespace, xsdNamespace)) {
+            val kind = child.localName
+            val name = WsdlQName(target, child.attributeValue("name"))
+            if (kind == "element") {
+                val hold = fieldFrom(child, target, qualified, attributesQualified, 1, 1)
+                elements.append(XsdElement(name, hold.typeName, hold.inline, hold.nillable))
+            } else if (kind == "complexType") {
+                types.append(complexType(child, name, target, qualified, attributesQualified))
+            } else if (kind == "simpleType") {
+                types.append(simpleType(child, name))
+            } else if (kind == "group") {
+                val fields: array<XsdField> = []
+                particles(child, fields, target, qualified, attributesQualified, 1, 1)
+                groups.append(XsdGroup(name, fields))
+            } else if (kind == "attributeGroup") {
+                val fields: array<XsdField> = []
+                attributesOf(child, fields, target, attributesQualified)
+                attributeGroups.append(XsdGroup(name, fields))
+            } else if (kind == "attribute") {
+                globalAttributes.append(attributeFrom(child, target, true))
+            } else if (kind == "import" || kind == "include" || kind == "redefine") {
+                schemaImport(child, kind, target, qualified, attributesQualified)
+            }
+        }
+        scope.truncate(scope.size - 1)
+        return
+    }
+
+    fun schemaImport(element: XmlElement, kind: string, target: string, qualified: bool, attributesQualified: bool): void {
+        val location = element.attributeValue("schemaLocation")
+        if (kind == "redefine") {
+            fail("unsupported", "xs:redefine at line ${element.line}")
+            return
+        }
+        // An import with no location only says a namespace is used: another inline schema has it, or it can't be known.
+        if (location == "") return
+        val root = readImported(location)
+        if (root == null) return
+        if (root.localName != "schema" || root.namespaceUri != xsdNamespace) {
+            fail("not_a_schema", "$location isn't a schema")
+            return
+        }
+        // An include takes the including schema's namespace when it has none.
+        val own = root.attributeValue("targetNamespace")
+        if (kind == "include" && own != "" && own != target) {
+            fail("include_namespace", "$location has another target namespace")
+            return
+        }
+        val saved: array<XmlElement> = []
+        for (e in scope) saved.append(e)
+        scope.clear()
+        schemaWith(root, if (own == "") target else own, root.attributeValue("elementFormDefault") == "qualified", root.attributeValue("attributeFormDefault") == "qualified")
+        for (e in saved) scope.append(e)
+        return
+    }
+
+    fun inlineName(hint: string): WsdlQName {
+        anonymous = anonymous + 1
+        WsdlQName("", hint)
+    }
+
+    fun simpleType(element: XmlElement, name: WsdlQName): XsdType {
+        scope.append(element)
+        var base: WsdlQName? = null
+        val values: array<string> = []
+        var digits = 0
+        var opaque = false
+        var inlineBase: XsdType? = null
+        val restriction = element.child("restriction", xsdNamespace)
+        if (restriction != null) {
+            base = optionalQName(restriction, "base")
+            for (facet in restriction.elements(xmlAnyNamespace, xsdNamespace)) {
+                if (facet.localName == "enumeration") values.append(facet.attributeValue("value"))
+                if (facet.localName == "totalDigits") digits = wsdlOccurs(facet.attributeValue("value"), 0)
+            }
+            val nested = restriction.child("simpleType", xsdNamespace)
+            if (nested != null) {
+                scope.append(restriction)
+                inlineBase = simpleType(nested, inlineName(name.local))
+                scope.truncate(scope.size - 1)
+            }
+        } else {
+            opaque = true
+        }
+        scope.truncate(scope.size - 1)
+        XsdType(name, false, base, [], values, if (digits < 0) 0 else digits, opaque, false, inlineBase)
+    }
+
+    fun complexType(element: XmlElement, name: WsdlQName, target: string, qualified: bool, attributesQualified: bool): XsdType {
+        scope.append(element)
+        val fields: array<XsdField> = []
+        var base: WsdlQName? = null
+        var restricts = false
+        val content = element.child("complexContent", xsdNamespace)
+        val simple = element.child("simpleContent", xsdNamespace)
+        val holder = if (content != null) content else simple
+        if (holder != null) {
+            scope.append(holder)
+            val extension = holder.child("extension", xsdNamespace)
+            val restriction = holder.child("restriction", xsdNamespace)
+            val by = if (extension != null) extension else restriction
+            if (by != null) {
+                restricts = extension == null
+                base = optionalQName(by, "base")
+                scope.append(by)
+                particles(by, fields, target, qualified, attributesQualified, 1, 1)
+                attributesOf(by, fields, target, attributesQualified)
+                scope.truncate(scope.size - 1)
+            }
+            scope.truncate(scope.size - 1)
+        } else {
+            particles(element, fields, target, qualified, attributesQualified, 1, 1)
+            attributesOf(element, fields, target, attributesQualified)
+        }
+        scope.truncate(scope.size - 1)
+        XsdType(name, true, base, fields, [], 0, false, restricts, null)
+    }
+
+    // The elements in a type, each with the occurrence of what contains it. A choice makes each optional.
+    fun particles(element: XmlElement, var out: array<XsdField>, target: string, qualified: bool, attributesQualified: bool, outerMin: int, outerMax: int): void {
+        for (child in element.elements(xmlAnyNamespace, xsdNamespace)) {
+            val kind = child.localName
+            if (kind == "sequence" || kind == "all" || kind == "choice") {
+                val min = wsdlOccurs(child.attributeValue("minOccurs"), 1)
+                val max = wsdlOccurs(child.attributeValue("maxOccurs"), 1)
+                if (min == -2 || max == -2) fail("bad_occurs", "line ${child.line}")
+                scope.append(child)
+                particles(child, out, target, qualified, attributesQualified,
+                    if (kind == "choice" || min == 0 || outerMin == 0) 0 else 1,
+                    if (max != 1 || outerMax != 1) -1 else 1)
+                scope.truncate(scope.size - 1)
+            } else if (kind == "element") {
+                out.append(fieldFrom(child, target, qualified, attributesQualified, outerMin, outerMax))
+            } else if (kind == "any") {
+                out.append(XsdField(xsdFieldAny, WsdlQName("", "any"), null, null, null, 0, -1, false))
+            } else if (kind == "group") {
+                val ref = optionalQName(child, "ref")
+                if (ref != null) out.append(XsdField(xsdFieldGroup, ref, null, null, ref, if (outerMin == 0) 0 else wsdlOccurs(child.attributeValue("minOccurs"), 1), if (outerMax != 1) -1 else wsdlOccurs(child.attributeValue("maxOccurs"), 1), false))
+            }
+        }
+        return
+    }
+
+    fun attributesOf(element: XmlElement, var out: array<XsdField>, target: string, attributesQualified: bool): void {
+        for (child in element.elements(xmlAnyNamespace, xsdNamespace)) {
+            if (child.localName == "attribute") {
+                out.append(attributeFrom(child, target, attributesQualified))
+            } else if (child.localName == "attributeGroup") {
+                val ref = optionalQName(child, "ref")
+                if (ref != null) out.append(XsdField(xsdFieldAttributeGroup, ref, null, null, ref, 1, 1, false))
+            }
+        }
+        return
+    }
+
+    fun attributeFrom(element: XmlElement, target: string, attributesQualified: bool): XsdField {
+        val ref = optionalQName(element, "ref")
+        val use = element.attributeValue("use")
+        val min = if (use == "required") 1 else 0
+        if (ref != null) return XsdField(xsdFieldAttribute, ref, null, null, ref, min, 1, false)
+        val form = element.attributeValue("form")
+        val qualified = form == "qualified" || (form == "" && attributesQualified)
+        val local = element.attributeValue("name")
+        val nested = element.child("simpleType", xsdNamespace)
+        var inline: XsdType? = null
+        if (nested != null) {
+            scope.append(element)
+            inline = simpleType(nested, inlineName(local))
+            scope.truncate(scope.size - 1)
+        }
+        XsdField(xsdFieldAttribute, WsdlQName(if (qualified) target else "", local), optionalQName(element, "type"), inline, null, min, 1, false)
+    }
+
+    fun fieldFrom(element: XmlElement, target: string, qualified: bool, attributesQualified: bool, outerMin: int, outerMax: int): XsdField {
+        val minOwn = wsdlOccurs(element.attributeValue("minOccurs"), 1)
+        val maxOwn = wsdlOccurs(element.attributeValue("maxOccurs"), 1)
+        if (minOwn == -2 || maxOwn == -2) fail("bad_occurs", "line ${element.line}")
+        val min = if (outerMin == 0 || minOwn == 0) 0 else 1
+        val max = if (outerMax != 1 || maxOwn != 1) -1 else 1
+        val ref = optionalQName(element, "ref")
+        if (ref != null) return XsdField(xsdFieldElement, ref, null, null, ref, min, max, false)
+        val local = element.attributeValue("name")
+        val form = element.attributeValue("form")
+        val isQualified = form == "qualified" || (form == "" && qualified)
+        scope.append(element)
+        var inline: XsdType? = null
+        val complex = element.child("complexType", xsdNamespace)
+        val simple = element.child("simpleType", xsdNamespace)
+        if (complex != null) inline = complexType(complex, inlineName(local), target, qualified, attributesQualified)
+        else if (simple != null) inline = simpleType(simple, inlineName(local))
+        scope.truncate(scope.size - 1)
+        val typeName = optionalQName(element, "type")
+        val nillable = element.attributeValue("nillable") == "true"
+        XsdField(xsdFieldElement, WsdlQName(if (isQualified) target else "", local), typeName, inline, null, min, max, nillable)
+    }
+
+    // --- WSDL ---
+
+    fun definitions(root: XmlElement, location: string): void {
+        if (root.namespaceUri == wsdl20Namespace) {
+            fail("wsdl_2_0", "WSDL 2.0 isn't read here")
+            return
+        }
+        if (root.localName != "definitions" || root.namespaceUri != wsdlNamespace) {
+            fail("not_wsdl", "the root element is ${root.name}")
+            return
+        }
+        val target = root.attributeValue("targetNamespace")
+        if (name == "") name = root.attributeValue("name")
+        if (targetNamespace == "") targetNamespace = target
+        scope.append(root)
+        for (child in root.elements(xmlAnyNamespace, wsdlNamespace)) {
+            val kind = child.localName
+            if (kind == "import") {
+                val nested = child.attributeValue("location")
+                if (nested != "") {
+                    val imported = readImported(nested)
+                    if (imported != null) {
+                        val saved: array<XmlElement> = []
+                        for (e in scope) saved.append(e)
+                        scope.clear()
+                        if (imported.localName == "schema" && imported.namespaceUri == xsdNamespace) schema(imported)
+                        else definitions(imported, nested)
+                        scope.clear()
+                        for (e in saved) scope.append(e)
+                    }
+                }
+            } else if (kind == "types") {
+                scope.append(child)
+                for (s in child.elements("schema", xsdNamespace)) schema(s)
+                scope.truncate(scope.size - 1)
+            } else if (kind == "message") {
+                message(child, target)
+            } else if (kind == "portType") {
+                portType(child, target)
+            } else if (kind == "binding") {
+                binding(child, target)
+            } else if (kind == "service") {
+                service(child)
+            }
+        }
+        scope.truncate(scope.size - 1)
+        return
+    }
+
+    fun message(element: XmlElement, target: string): void {
+        scope.append(element)
+        val parts: array<WsdlPart> = []
+        for (part in element.elements("part", wsdlNamespace)) {
+            parts.append(WsdlPart(part.attributeValue("name"), optionalQName(part, "element"), optionalQName(part, "type")))
+        }
+        scope.truncate(scope.size - 1)
+        messages.append(WsdlMessage(WsdlQName(target, element.attributeValue("name")), parts))
+        return
+    }
+
+    fun portType(element: XmlElement, target: string): void {
+        scope.append(element)
+        val operations: array<WsdlOperation> = []
+        for (operation in element.elements("operation", wsdlNamespace)) {
+            scope.append(operation)
+            val input = operation.child("input", wsdlNamespace)
+            val output = operation.child("output", wsdlNamespace)
+            val faults: array<WsdlQName> = []
+            for (fault in operation.elements("fault", wsdlNamespace)) {
+                val m = optionalQName(fault, "message")
+                if (m != null) faults.append(m)
+            }
+            operations.append(WsdlOperation(
+                operation.attributeValue("name"),
+                if (input != null) optionalQName(input, "message") else null,
+                if (output != null) optionalQName(output, "message") else null,
+                faults
+            ))
+            scope.truncate(scope.size - 1)
+        }
+        scope.truncate(scope.size - 1)
+        portTypes.append(WsdlPortType(WsdlQName(target, element.attributeValue("name")), operations))
+        return
+    }
+
+    fun bodyBinding(direction: XmlElement?, soapNamespace: string): WsdlBodyBinding? {
+        if (direction == null) return null
+        scope.append(direction)
+        val body = direction.child("body", soapNamespace)
+        val headers: array<WsdlHeaderRef> = []
+        for (header in direction.elements("header", soapNamespace)) {
+            val m = optionalQName(header, "message")
+            if (m != null) headers.append(WsdlHeaderRef(m, header.attributeValue("part")))
+        }
+        scope.truncate(scope.size - 1)
+        if (body == null) return WsdlBodyBinding("literal", "", false, [], headers)
+        val attribute = body.attribute("parts")
+        WsdlBodyBinding(body.attributeValue("use", "literal"), body.attributeValue("namespace"), attribute != null, if (attribute != null) wsdlWords(attribute.value) else [], headers)
+    }
+
+    fun binding(element: XmlElement, target: string): void {
+        val soap = element.child("binding", wsdlSoap11Namespace)
+        val soap12Binding = element.child("binding", wsdlSoap12Namespace)
+        val own = if (soap != null) soap else soap12Binding
+        val bindingName = element.attributeValue("name")
+        if (own == null) {
+            notes.append("binding $bindingName isn't SOAP: left out")
+            return
+        }
+        val soapNamespace = if (soap != null) wsdlSoap11Namespace else wsdlSoap12Namespace
+        val transport = own.attributeValue("transport")
+        if (transport != "http://schemas.xmlsoap.org/soap/http" && transport != "http://www.w3.org/2003/05/soap/bindings/HTTP/" && transport != "") {
+            notes.append("binding $bindingName isn't over HTTP: left out")
+            return
+        }
+        val style = own.attributeValue("style", "document")
+        scope.append(element)
+        val operations: array<WsdlBindingOperation> = []
+        for (operation in element.elements("operation", wsdlNamespace)) {
+            scope.append(operation)
+            val soapOperation = operation.child("operation", soapNamespace)
+            operations.append(WsdlBindingOperation(
+                operation.attributeValue("name"),
+                if (soapOperation != null) soapOperation.attributeValue("soapAction") else "",
+                if (soapOperation != null) soapOperation.attributeValue("style", style) else style,
+                bodyBinding(operation.child("input", wsdlNamespace), soapNamespace),
+                bodyBinding(operation.child("output", wsdlNamespace), soapNamespace)
+            ))
+            scope.truncate(scope.size - 1)
+        }
+        val portTypeName = qname(element.attributeValue("type"), element)
+        scope.truncate(scope.size - 1)
+        bindings.append(WsdlBinding(WsdlQName(target, bindingName), portTypeName, if (soap != null) soap11 else soap12, style, operations))
+        return
+    }
+
+    fun service(element: XmlElement): void {
+        scope.append(element)
+        val ports: array<WsdlPort> = []
+        for (port in element.elements("port", wsdlNamespace)) {
+            scope.append(port)
+            val eleven = port.child("address", wsdlSoap11Namespace)
+            val twelve = port.child("address", wsdlSoap12Namespace)
+            val address = if (eleven != null) eleven else twelve
+            if (address != null) ports.append(WsdlPort(port.attributeValue("name"), qname(port.attributeValue("binding"), port), address.attributeValue("location")))
+            scope.truncate(scope.size - 1)
+        }
+        scope.truncate(scope.size - 1)
+        services.append(WsdlService(element.attributeValue("name"), ports))
+        return
+    }
+}
+
+fun wsdlParse(source: string, resolver: WsdlResolver = WsdlNoImports(), options: WsdlOptions = WsdlOptions()): WsdlParseResult {
+    var reader = WsdlReader(resolver, options, [], [], null, 0, [], [], [], [], [], [], [], [], [], [], "", "")
+    val root = reader.readDocument(source, "the document")
+    if (root != null) reader.definitions(root, "the document")
+    val problem = reader.problem
+    if (problem != null) return WsdlParseResult(false, null, problem)
+    if (root == null) return WsdlParseResult(false, null, SoapError("xml", "no document"))
+    WsdlParseResult(true, WsdlDefinitions(reader.name, reader.targetNamespace, reader.elements, reader.types, reader.groups, reader.attributeGroups, reader.globalAttributes, reader.messages, reader.portTypes, reader.bindings, reader.services, reader.notes), null)
+}

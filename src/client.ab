@@ -1,0 +1,177 @@
+// A SOAP client on any HTTP client, so that a program without TLS links none: see "abla-soap/tls" for one with it.
+export import "envelope.ab"
+export import "decode.ab"
+export import "wssecurity.ab"
+import "abla/http"
+
+// What a call came to. `ok()`, or a `fault`, or an `error`. A fault's status is usually 500 and may be anything.
+class SoapResponse(
+    val status: int,
+    val envelope: SoapEnvelope?,
+    val fault: SoapFault?,
+    val error: SoapError?
+) {
+    fun ok(): bool = fault == null && error == null
+}
+
+// A generated client's result: the value when `ok()`, and what happened otherwise.
+class SoapCall<T>(
+    val value: T?,
+    val response: SoapResponse,
+    val decoding: SoapDecoder
+) {
+    fun ok(): bool = value != null && response.ok() && decoding.ok()
+    fun fault(): SoapFault? = response.fault
+    // One line on what went wrong, or "".
+    fun problem(): string {
+        val fault = response.fault
+        if (fault != null) return "fault ${fault.code.text}: ${fault.message}"
+        val error = response.error
+        if (error != null) return "${error.code}: ${error.message}"
+        decoding.summary()
+    }
+}
+
+fun <T> soapCallFailed(response: SoapResponse): SoapCall<T> = SoapCall<T>(null, response, soapDecoder())
+
+fun soapResponseFailed(status: int, code: string, message: string): SoapResponse =
+    SoapResponse(status, null, null, SoapError(code, message))
+
+class SoapClient(
+    val http: HttpClient,
+    val path: string,
+    val version: SoapVersion,
+    val headers: array<SoapHeaderSource>,
+    // Whether the transport is TLS; a header that needs it refuses to go otherwise.
+    val secure: bool,
+    val parse: SoapParseOptions,
+    // Mandatory headers a response may hold: as `local` or `{namespace}local`.
+    val understood: array<string>,
+    val extraHttpHeaders: array<HttpHeader>,
+    val prefix: string
+)
+
+fun soapClient(
+    http: HttpClient,
+    path: string,
+    version: SoapVersion = soap11,
+    headers: array<SoapHeaderSource> = [],
+    secure: bool = false,
+    parse: SoapParseOptions = SoapParseOptions(),
+    understood: array<string> = [],
+    extraHttpHeaders: array<HttpHeader> = [],
+    prefix: string = "soapenv"
+): SoapClient = SoapClient(http, path, version, headers, secure, parse, understood, extraHttpHeaders, prefix)
+
+// One message on its way: `writer` has its headers written. Go on with more headers, then `body()`, then the client's `send`.
+class SoapOutgoing(var writer: SoapWriter, val problem: string) {
+    fun body(): void {
+        writer.endHeader()
+        writer.startBody()
+        return
+    }
+}
+
+fun SoapClient.begin(): SoapOutgoing {
+    var writer = soapWriter(this.version, this.prefix)
+    writer.startHeader()
+    var problem = ""
+    for (source in this.headers) {
+        if (problem == "") {
+            if (source.needsTls() && !this.secure) problem = "a security header can't go over a plain connection"
+            else problem = source.write(writer.xml)
+        }
+    }
+    SoapOutgoing(writer, problem)
+}
+
+// A value for a Content-Type or SOAPAction header can't be allowed to end the header.
+private fun soapSafeHeaderValue(value: string): bool {
+    for (c in value) if (c == 13 || c == 10 || c == 34 || c == 0) return false
+    true
+}
+
+fun soapHttpHeaders(version: SoapVersion, action: string, extra: array<HttpHeader> = []): array<HttpHeader> {
+    val headers: array<HttpHeader> = []
+    if (version.name == "1.1") {
+        headers.append(HttpHeader("Content-Type", "text/xml; charset=utf-8"))
+        headers.append(HttpHeader("SOAPAction", "\"$action\""))
+    } else {
+        val quoted = if (action == "") "" else "; action=\"$action\""
+        headers.append(HttpHeader("Content-Type", "application/soap+xml; charset=utf-8$quoted"))
+    }
+    headers.append(HttpHeader("Accept", "${version.mediaType}, text/xml"))
+    for (h in extra) headers.append(h)
+    headers
+}
+
+// Reads what came back. A fault is the answer whatever the status. Anything else that isn't 2xx, or isn't an envelope of the
+// version sent, is an error, whatever it holds; 202 and an empty 200 are a call with nothing to return.
+fun SoapClient.read(result: HttpClientResult): SoapResponse {
+    if (!result.succeeded) return soapResponseFailed(0, "transport", "no response")
+    val status = result.response.status
+    if (!result.complete) return soapResponseFailed(status, "truncated", "the response was cut short, or is over the limit")
+    val body = result.response.body
+    val success = status >= 200 && status < 300
+    if (body.trim() == "") {
+        if (success) return SoapResponse(status, null, null, null)
+        return soapResponseFailed(status, "http", "status $status with no body")
+    }
+    val parsed = soapParse(body, this.parse)
+    val problem = parsed.error
+    val envelope = parsed.envelope
+    if (problem != null || envelope == null) {
+        if (success) return SoapResponse(status, null, null, problem)
+        return soapResponseFailed(status, "http", "status $status, and no envelope in the body")
+    }
+    val fault = envelope.fault
+    if (fault != null) return SoapResponse(status, envelope, fault, null)
+    if (!success) return soapResponseFailed(status, "http", "status $status with no fault")
+    if (envelope.version.name != this.version.name) {
+        return soapResponseFailed(status, "version_mismatch", "sent SOAP ${this.version.name}, got ${envelope.version.name}")
+    }
+    val left = soapNotUnderstood(envelope, this.understood)
+    if (left.size > 0) return soapResponseFailed(status, "must_understand", "the response requires ${left[0].name}")
+    SoapResponse(status, envelope, null, null)
+}
+
+fun SoapClient.send(action: string, var outgoing: SoapOutgoing): SoapResponse {
+    if (outgoing.problem != "") return soapResponseFailed(0, "header", outgoing.problem)
+    if (!soapSafeHeaderValue(action)) return soapResponseFailed(0, "action", "the action can't go in an HTTP header")
+    val written = outgoing.writer.finish()
+    val problem = written.error
+    if (problem != null) return soapResponseFailed(0, problem.code, problem.message)
+    this.read(this.http.send(httpPost(this.path, written.text, soapHttpHeaders(this.version, action, this.extraHttpHeaders))))
+}
+
+// Where a URL points. Only what SOAP addresses need: a scheme, a host, a port and a path. `error` when it isn't one.
+class SoapUrl(val tls: bool, val host: string, val port: int, val path: string, val error: string)
+
+fun soapParseUrl(url: string): SoapUrl {
+    val tls = url.startsWith("https://")
+    if (!tls && !url.startsWith("http://")) return SoapUrl(false, "", 0, "", "only http and https: $url")
+    for (c in url) if (c <= 32 || c >= 127) return SoapUrl(false, "", 0, "", "a space or control character in the URL")
+    val begin = if (tls) 8 else 7
+    var end = begin
+    while (end < url.size && url[end] != 47 && url[end] != 63 && url[end] != 35) end = end + 1
+    val authority = url.slice(begin, end)
+    if (authority.indexOf("@") >= 0) return SoapUrl(false, "", 0, "", "credentials in the URL")
+    val colon = authority.indexOf(":")
+    val host = if (colon >= 0) authority.slice(0, colon) else authority
+    if (host == "") return SoapUrl(false, "", 0, "", "no host in the URL")
+    var port = if (tls) 443 else 80
+    if (colon >= 0) {
+        port = 0
+        val digits = authority.slice(colon + 1, authority.size)
+        if (digits == "" || digits.size > 5) return SoapUrl(false, "", 0, "", "a bad port in the URL")
+        for (c in digits) {
+            if (c < 48 || c > 57) return SoapUrl(false, "", 0, "", "a bad port in the URL")
+            port = port * 10 + c - 48
+        }
+        if (port < 1 || port > 65535) return SoapUrl(false, "", 0, "", "a bad port in the URL")
+    }
+    var pathEnd = end
+    while (pathEnd < url.size && url[pathEnd] != 35) pathEnd = pathEnd + 1
+    val path = url.slice(end, pathEnd)
+    SoapUrl(tls, host, port, if (path == "") "/" else if (path[0] == 63) "/$path" else path, "")
+}

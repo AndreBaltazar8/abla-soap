@@ -1,0 +1,215 @@
+import "../src/envelope.ab"
+import "abla/test"
+import "abla/bytes"
+import "abla/text"
+
+val e11 = "<e:Envelope xmlns:e=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+val e12 = "<e:Envelope xmlns:e=\"http://www.w3.org/2003/05/soap-envelope\">"
+
+fun parsed(source: string): SoapEnvelope {
+    val result = soapParse(source)
+    val problem = result.error
+    if (problem != null) expect(false, "parses [$source]: ${problem.code} ${problem.message}")
+    val envelope = result.envelope
+    if (envelope != null) return envelope
+    val minimal = soapParse("$e11<e:Body/></e:Envelope>").envelope
+    if (minimal != null) minimal else parsed(source)
+}
+
+fun rejects(source: string, code: string, options: SoapParseOptions = SoapParseOptions()): void {
+    val result = soapParse(source, options)
+    val problem = result.error
+    expect(!result.succeeded, "rejects [${source.slice(0, if (source.size < 80) source.size else 80)}]")
+    expectEqual(if (problem != null) problem.code else "", code, "code")
+    return
+}
+
+fun repeat(unit: string, count: int): string {
+    val out = byteBuffer()
+    for (i in 0 until count) out.appendText(unit)
+    out.toText()
+}
+
+// writes the same bytes each time, in each version
+fun case0(): void {
+    val w = soapWriter()
+    w.startHeader()
+    w.xml.element("h", "1")
+    w.endHeader()
+    w.startBody()
+    w.xml.startElement("a:b")
+    w.xml.namespace("a", "urn:a")
+    w.xml.text("x & y")
+    w.xml.endElement()
+    val r = w.finish()
+    expect(r.succeeded, "written")
+    expectEqual(r.text, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header><h>1</h></soapenv:Header><soapenv:Body><a:b xmlns:a=\"urn:a\">x &amp; y</a:b></soapenv:Body></soapenv:Envelope>", "1.1")
+
+    val w2 = soapWriter(soap12, "S", false)
+    w2.startBody()
+    expectEqual(w2.finish().text, "<S:Envelope xmlns:S=\"http://www.w3.org/2003/05/soap-envelope\"><S:Body/></S:Envelope>", "1.2")
+    return
+}
+
+// the writer refuses envelopes out of order
+fun case1(): void {
+    val noBody = soapWriter()
+    expect(!noBody.finish().succeeded, "no body")
+    val late = soapWriter()
+    late.startBody()
+    late.startHeader()
+    expect(!late.finish().succeeded, "header after body")
+    val twice = soapWriter()
+    twice.startBody()
+    twice.startBody()
+    expect(!twice.finish().succeeded, "two bodies")
+    val open = soapWriter()
+    open.startBody()
+    open.xml.startElement("left")
+    expect(!open.finish().succeeded, "an element left open")
+    val invalid = soapWriter()
+    invalid.startBody()
+    invalid.xml.startElement("undeclared:x")
+    val r = invalid.finish()
+    expect(!r.succeeded, "an undeclared prefix")
+    return
+}
+
+// parses headers and a body, in either version
+fun case2(): void {
+    val a = parsed("$e11<e:Header><h:t xmlns:h=\"urn:h\">v</h:t></e:Header><e:Body><m:r xmlns:m=\"urn:m\">ok</m:r></e:Body></e:Envelope>")
+    expectEqual(a.version.name, "1.1", "version")
+    expectEqual(a.headers.size, 1, "headers")
+    val h = a.header("t", "urn:h")
+    expectEqual(if (h != null) h.text() else "", "v", "header")
+    val c = a.content()
+    expectEqual(if (c != null) c.text() else "", "ok", "content")
+    expect(a.fault == null, "no fault")
+    val b = parsed("$e12<e:Body/></e:Envelope>")
+    expectEqual(b.version.name, "1.2", "version")
+    expect(b.content() == null, "empty")
+    return
+}
+
+// reads a 1.1 fault, resolving the code's prefix
+fun case3(): void {
+    val a = parsed("$e11<e:Body><e:Fault><faultcode xmlns:x=\"urn:x\">x:Busy</faultcode><faultstring>try later</faultstring><faultactor>urn:gw</faultactor><detail><why>queue</why></detail></e:Fault></e:Body></e:Envelope>")
+    val f = a.fault
+    expect(f != null, "a fault")
+    if (f != null) {
+        expectEqual(f.code.local, "Busy", "local")
+        expectEqual(f.code.namespace, "urn:x", "namespace")
+        expectEqual(f.code.text, "x:Busy", "as written")
+        expectEqual(f.message, "try later", "message")
+        expectEqual(f.role, "urn:gw", "role")
+        val d = f.detail
+        expectEqual(if (d != null) d.childText("why") else "", "queue", "detail")
+        expect(!f.blamesSender(), "another namespace's code")
+    }
+    val b = parsed("$e11<e:Body><e:Fault><faultcode>e:Client</faultcode><faultstring>no</faultstring></e:Fault></e:Body></e:Envelope>")
+    val g = b.fault
+    expect(g != null && g.blamesSender() && g.isFrom("Client", soap11Namespace), "client fault")
+    return
+}
+
+// reads a 1.2 fault, with subcodes and languages
+fun case4(): void {
+    val a = parsed("$e12<e:Body><e:Fault><e:Code><e:Value>e:Sender</e:Value><e:Subcode xmlns:m=\"urn:m\"><e:Value>m:Bad</e:Value><e:Subcode><e:Value>m:Worse</e:Value></e:Subcode></e:Subcode></e:Code><e:Reason><e:Text xml:lang=\"pt\">mau</e:Text><e:Text xml:lang=\"en\">bad</e:Text></e:Reason><e:Node>urn:n</e:Node><e:Role>urn:r</e:Role><e:Detail><k>1</k></e:Detail></e:Fault></e:Body></e:Envelope>")
+    val f = a.fault
+    expect(f != null, "a fault")
+    if (f != null) {
+        expect(f.blamesSender(), "sender")
+        expectEqual(f.subcodes.size, 2, "subcodes")
+        expectEqual(f.subcodes[1].namespace, "urn:m", "a subcode's prefix, from further out")
+        expectEqual(f.subcodes[1].local, "Worse", "local")
+        expectEqual(f.message, "mau", "first")
+        expectEqual(f.reasons[1].language, "en", "language")
+        expectEqual(f.node, "urn:n", "node")
+        expectEqual(f.role, "urn:r", "role")
+    }
+    return
+}
+
+// a fault written here reads back
+fun case5(): void {
+    val w = soapWriter()
+    w.startBody()
+    soapWriteFault(w, "Server", "down <now>")
+    val a = parsed(w.finish().text)
+    val f = a.fault
+    expect(f != null && f.isFrom("Server", soap11Namespace) && f.message == "down <now>", "1.1")
+    val w2 = soapWriter(soap12)
+    w2.startBody()
+    soapWriteFault(w2, "Receiver", "down")
+    val b = parsed(w2.finish().text).fault
+    expect(b != null && b.isFrom("Receiver", soap12Namespace) && b.message == "down" && b.reasons[0].language == "en", "1.2")
+    return
+}
+
+// refuses what isn't an envelope
+fun case6(): void {
+    rejects("<a/>", "not_an_envelope")
+    rejects("<Envelope/>", "version_mismatch")
+    rejects("<Envelope xmlns=\"urn:other\"/>", "version_mismatch")
+    rejects("$e11</e:Envelope>", "no_body")
+    rejects("${e11}text<e:Body/></e:Envelope>", "stray_text")
+    rejects("$e11<e:Body/><e:Body/></e:Envelope>", "misplaced_part")
+    rejects("$e11<e:Body/><e:Header/></e:Envelope>", "misplaced_part")
+    rejects("$e11<e:Header/><e:Header/><e:Body/></e:Envelope>", "misplaced_part")
+    rejects("$e11<x/><e:Body/></e:Envelope>", "misplaced_part")
+    rejects("$e12<e:Body/><x/></e:Envelope>", "misplaced_part")
+    rejects("$e11<e:Body><e:Fault/><x/></e:Body></e:Envelope>", "misplaced_fault")
+    rejects("<a", "xml_unexpected_end")
+    expect(soapParse("$e11<e:Body/><x/></e:Envelope>").succeeded, "1.1 allows a trailer")
+    return
+}
+
+// refuses hostile XML
+fun case7(): void {
+    // Billion laughs, external entities and a parameter entity: a DOCTYPE at all.
+    rejects("<!DOCTYPE e:Envelope [<!ENTITY a 'x'><!ENTITY b '&a;&a;'>]>$e11<e:Body>&b;</e:Body></e:Envelope>", "xml_dtd_forbidden")
+    rejects("<!DOCTYPE d [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>$e11<e:Body>&x;</e:Body></e:Envelope>", "xml_dtd_forbidden")
+    rejects("<!DOCTYPE d SYSTEM 'http://127.0.0.1:9/evil.dtd'>$e11<e:Body/></e:Envelope>", "xml_dtd_forbidden")
+    rejects("<!DOCTYPE d [<!ENTITY % p SYSTEM 'http://127.0.0.1:9/p'>%p;]>$e11<e:Body/></e:Envelope>", "xml_dtd_forbidden")
+    // An entity nobody declared.
+    rejects("$e11<e:Body>&x;</e:Body></e:Envelope>", "xml_undeclared_entity")
+    // Depth.
+    val deep = "$e11<e:Body>${repeat("<a>", 500)}${repeat("</a>", 500)}</e:Body></e:Envelope>"
+    rejects(deep, "xml_too_deep")
+    // Size, and values, and nodes.
+    rejects("$e11<e:Body>${repeat("x", 2000)}</e:Body></e:Envelope>", "xml_too_large", SoapParseOptions(maxBytes = 1000))
+    rejects("$e11<e:Body>${repeat("<a/>", 200)}</e:Body></e:Envelope>", "xml_too_many_nodes", SoapParseOptions(maxNodes = 100))
+    rejects("$e11<e:Body>${repeat("x", 2000)}</e:Body></e:Envelope>", "xml_value_too_long", SoapParseOptions(maxValueBytes = 1000))
+    // Instructions, which SOAP forbids.
+    rejects("<?evil?>$e11<e:Body/></e:Envelope>", "processing_instruction")
+    rejects("$e11<e:Body><a><?evil x?></a></e:Body></e:Envelope>", "processing_instruction")
+    rejects("$e11<e:Body/></e:Envelope><?evil?>", "processing_instruction")
+    // A namespace trick: Envelope bound to another URI by prefix.
+    rejects("<e:Envelope xmlns:e=\"http://schemas.xmlsoap.org/soap/envelope\"><e:Body/></e:Envelope>", "version_mismatch")
+    return
+}
+
+// headers that must be understood
+fun case8(): void {
+    val a = parsed("$e11<e:Header><a e:mustUnderstand=\"1\"/><b e:mustUnderstand=\"0\"/><c e:mustUnderstand=\"1\" e:actor=\"urn:other\"/><d xmlns=\"urn:d\" e:mustUnderstand=\"1\"/></e:Header><e:Body/></e:Envelope>")
+    val left = soapNotUnderstood(a, ["{urn:d}d"])
+    expectEqual(left.size, 1, "a is left")
+    expectEqual(left[0].name, "a", "name")
+    expectEqual(soapNotUnderstood(a, ["a", "d"]).size, 0, "known")
+    val b = parsed("$e12<e:Header><a e:mustUnderstand=\"true\"/><c e:mustUnderstand=\"true\" e:role=\"http://www.w3.org/2003/05/soap-envelope/role/none\"/></e:Header><e:Body/></e:Envelope>")
+    expectEqual(soapNotUnderstood(b, []).size, 1, "1.2")
+    return
+}
+
+fun main: int {
+    case0()
+    case1()
+    case2()
+    case3()
+    case4()
+    case5()
+    case6()
+    case7()
+    case8()
+    testsPassed()
+}

@@ -1,0 +1,167 @@
+import "../src/generate.ab"
+import "abla/bytes"
+import "abla/fs"
+import "abla/test"
+import "abla/text"
+
+val head = "<definitions xmlns=\"http://schemas.xmlsoap.org/wsdl/\" xmlns:s=\"http://schemas.xmlsoap.org/wsdl/soap/\" xmlns:x=\"http://www.w3.org/2001/XMLSchema\" xmlns:t=\"urn:t\" targetNamespace=\"urn:t\">"
+
+fun code(result: WsdlParseResult): string {
+    val problem = result.error
+    if (problem != null) problem.code else ""
+}
+
+fun repeat(unit: string, count: int): string {
+    val out = byteBuffer()
+    for (i in 0 until count) out.appendText(unit)
+    out.toText()
+}
+
+fun failure(source: string): string {
+    val made = wsdlGenerateFrom(source)
+    val problem = made.error
+    if (problem != null) problem.code else ""
+}
+
+fun shop(): WsdlDefinitions {
+    val parsed = wsdlParse(Path("tests/fixtures/shop.wsdl").readText())
+    val problem = parsed.error
+    if (problem != null) expect(false, "${problem.code}: ${problem.message}")
+    val d = parsed.definitions
+    if (d != null) return d
+    WsdlDefinitions("", "", [], [], [], [], [], [], [], [], [], [])
+}
+
+class Files(val names: array<string>, val contents: array<string>) : WsdlResolver {
+    fun read(location: string): string? {
+        for (i in 0 until names.size) if (names[i] == location) return contents[i]
+        null
+    }
+}
+
+// reads the model
+fun case0(): void {
+    val d = shop()
+    expectEqual(d.name, "Shop", "name")
+    expectEqual(d.targetNamespace, "urn:shop", "target")
+    expectEqual(d.messages.size, 7, "messages")
+    expectEqual(d.portTypes.size, 2, "port types")
+    expectEqual(d.bindings.size, 2, "SOAP bindings")
+    expectEqual(d.bindings[0].version.name, "1.1", "1.1")
+    expectEqual(d.bindings[1].version.name, "1.2", "1.2")
+    expectEqual(d.bindings[1].style, "rpc", "style")
+    val op = d.bindings[0].operations[0]
+    expectEqual(op.action, "urn:shop/placeOrder", "action")
+    val input = op.input
+    expect(input != null && input.headers.size == 1 && input.namesParts && input.parts[0] == "parameters", "parts and headers")
+    expectEqual(d.services[0].ports.size, 2, "ports with a SOAP address")
+    expectEqual(d.services[0].ports[1].location, "https://shop.example:8443/sums", "location")
+    expectEqual(d.notes.size, 1, "the HTTP binding, noted")
+    return
+}
+
+// generating twice gives the same text, and says what it left out
+fun case1(): void {
+    val a = wsdlGenerate(shop(), WsdlGenerateOptions(prefix = "P"))
+    val b = wsdlGenerate(shop(), WsdlGenerateOptions(prefix = "P"))
+    expect(a.succeeded, "generated")
+    expectEqual(a.source, b.source, "deterministic")
+    expectEqual(a.notes.size, 2, "encoded and HTTP")
+    expect(a.notes[0].indexOf("oldAdd") >= 0, "encoded")
+    expect(a.source.indexOf("oldAdd") < 0, "not generated")
+    expect(a.source.indexOf(" f32") < 0 && a.source.indexOf(" f64") < 0, "no floats")
+    return
+}
+
+// hostile XML
+fun case2(): void {
+    expectEqual(code(wsdlParse("<!DOCTYPE d [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>$head&x;</definitions>")), "xml_dtd_forbidden", "external entity")
+    expectEqual(code(wsdlParse("<!DOCTYPE d [<!ENTITY a 'aaaa'><!ENTITY b '&a;&a;&a;&a;'><!ENTITY c '&b;&b;&b;&b;'>]>$head&c;</definitions>")), "xml_dtd_forbidden", "expansion")
+    expectEqual(code(wsdlParse("<!DOCTYPE d SYSTEM 'http://127.0.0.1:9/x.dtd'>$head</definitions>")), "xml_dtd_forbidden", "external subset")
+    expectEqual(code(wsdlParse("$head${repeat("<a>", 300)}${repeat("</a>", 300)}</definitions>")), "xml_too_deep", "depth")
+    expectEqual(code(wsdlParse("$head${repeat("<a/>", 200)}</definitions>", WsdlNoImports(), WsdlOptions(maxNodes = 100))), "xml_too_many_nodes", "nodes")
+    expectEqual(code(wsdlParse("$head${repeat("<a/>", 2000)}</definitions>", WsdlNoImports(), WsdlOptions(maxBytes = 1000))), "xml_too_large", "size")
+    expectEqual(code(wsdlParse("<a/>")), "not_wsdl", "not one")
+    expectEqual(code(wsdlParse("<description xmlns=\"http://www.w3.org/ns/wsdl\"/>")), "wsdl_2_0", "2.0")
+    return
+}
+
+// nothing is fetched unless a resolver does it
+fun case3(): void {
+    val wsdlImport = "$head<import namespace=\"urn:o\" location=\"http://127.0.0.1:9/other.wsdl\"/></definitions>"
+    expectEqual(code(wsdlParse(wsdlImport)), "import_refused", "WSDL import")
+    val schemaImport = "$head<types><x:schema targetNamespace=\"urn:t\"><x:import namespace=\"urn:o\" schemaLocation=\"file:///etc/passwd\"/></x:schema></types></definitions>"
+    expectEqual(code(wsdlParse(schemaImport)), "import_refused", "schema import")
+    val placeOnly = "$head<types><x:schema targetNamespace=\"urn:t\"><x:import namespace=\"urn:o\"/></x:schema></types></definitions>"
+    expect(wsdlParse(placeOnly).succeeded, "an import with no location reads nothing")
+    return
+}
+
+// imports through a resolver, cycles and limits
+fun case4(): void {
+    val root = "$head<types><x:schema targetNamespace=\"urn:t\"><x:include schemaLocation=\"a.xsd\"/><x:import namespace=\"urn:o\" schemaLocation=\"b.xsd\"/></x:schema></types><import location=\"more.wsdl\"/></definitions>"
+    val a = "<x:schema xmlns:x=\"http://www.w3.org/2001/XMLSchema\"><x:element name=\"fromA\" type=\"x:string\"/><x:include schemaLocation=\"a.xsd\"/></x:schema>"
+    val b = "<x:schema xmlns:x=\"http://www.w3.org/2001/XMLSchema\" targetNamespace=\"urn:o\"><x:element name=\"fromB\" type=\"x:string\"/></x:schema>"
+    val more = "<definitions xmlns=\"http://schemas.xmlsoap.org/wsdl/\" targetNamespace=\"urn:m\"><message name=\"m\"/></definitions>"
+    val parsed = wsdlParse(root, Files(["a.xsd", "b.xsd", "more.wsdl"], [a, b, more]))
+    expect(parsed.succeeded, "read: ${code(parsed)}")
+    val d = parsed.definitions
+    if (d != null) {
+        expectEqual(d.elements.size, 2, "elements")
+        expectEqual(d.elements[0].name.key(), "{urn:t}fromA", "an include takes the namespace")
+        expectEqual(d.elements[1].name.key(), "{urn:o}fromB", "an import keeps its own")
+        expectEqual(d.messages[0].name.key(), "{urn:m}m", "a WSDL import keeps its own")
+    }
+    val limited = wsdlParse(root, Files(["a.xsd", "b.xsd", "more.wsdl"], [a, b, more]), WsdlOptions(maxDocuments = 2))
+    expectEqual(code(limited), "too_many_documents", "limit")
+    val other = "<x:schema xmlns:x=\"http://www.w3.org/2001/XMLSchema\" targetNamespace=\"urn:o\"/>"
+    expectEqual(code(wsdlParse(root, Files(["a.xsd"], [other]))), "include_namespace", "an include of another namespace")
+    return
+}
+
+// what a WSDL names can't become code
+fun case5(): void {
+    val evil = "x&quot;);evil();//\${boom}\\"
+    val source = "$head<types><x:schema targetNamespace=\"urn:t\"><x:element name=\"e\"><x:complexType><x:sequence><x:element name=\"$evil\" type=\"x:string\"/><x:element name=\"fun\" type=\"x:string\"/><x:element name=\"a-b\" type=\"x:string\"/><x:element name=\"a.b\" type=\"x:string\"/></x:sequence></x:complexType></x:element><x:simpleType name=\"St\"><x:restriction base=\"x:string\"><x:enumeration value=\"$evil\"/></x:restriction></x:simpleType></x:schema></types><message name=\"m\"><part name=\"p\" element=\"t:e\"/></message><portType name=\"P\"><operation name=\"$evil\"><input message=\"t:m\"/></operation></portType><binding name=\"$evil\" type=\"t:P\"><s:binding style=\"document\" transport=\"http://schemas.xmlsoap.org/soap/http\"/><operation name=\"$evil\"><s:operation soapAction=\"$evil\"/><input><s:body use=\"literal\"/></input></operation></binding><service name=\"S\"><port name=\"p\" binding=\"t:$evil\"><s:address location=\"$evil\"/></port></service></definitions>"
+    val made = wsdlGenerateFrom(source)
+    val problem = made.error
+    if (problem != null) expect(false, "${problem.code}: ${problem.message}")
+    // Every way out of a string literal is escaped, and identifiers lose everything but letters and digits.
+    expect(made.source.indexOf("x\\\");evil();//\\\${boom}\\\\") > 0, "quoted")
+    var bare = 0
+    for (l in made.source.split("\n")) {
+        if (l.indexOf("evil()") >= 0 && l.indexOf("\"x\\\"") < 0 && l.indexOf("/x\\\"") < 0) bare = bare + 1
+    }
+    expectEqual(bare, 0, "only inside literals")
+    expect(made.source.indexOf("val fun_:") > 0, "a keyword as a field")
+    expect(made.source.indexOf("val a_b:") > 0, "punctuation")
+    expect(made.source.indexOf("val a_b_2:") > 0, "a collision")
+    return
+}
+
+// unknown names and cycles fail generation
+fun case6(): void {
+    val pre = "$head<types><x:schema targetNamespace=\"urn:t\">"
+    val post = "</x:schema></types></definitions>"
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:sequence><x:element name=\"b\" type=\"t:Nope\"/></x:sequence></x:complexType>$post"), "unknown_type", "a type")
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:sequence><x:element ref=\"t:nope\"/></x:sequence></x:complexType>$post"), "unknown_element", "an element")
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:sequence><x:element name=\"b\" type=\"nope:B\"/></x:sequence></x:complexType>$post"), "unknown_prefix", "a prefix")
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:complexContent><x:extension base=\"t:A\"/></x:complexContent></x:complexType>$post"), "type_cycle", "extending itself")
+    expectEqual(failure("$pre<x:simpleType name=\"A\"><x:restriction base=\"t:A\"/></x:simpleType><x:element name=\"e\" type=\"t:A\"/><x:complexType name=\"H\"><x:sequence><x:element ref=\"t:e\"/></x:sequence></x:complexType>$post"), "type_cycle", "a simple type by itself")
+    expectEqual(failure("$pre<x:group name=\"G\"><x:sequence><x:group ref=\"t:G\"/></x:sequence></x:group><x:complexType name=\"A\"><x:sequence><x:group ref=\"t:G\"/></x:sequence></x:complexType>$post"), "group_cycle", "a group in itself")
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:sequence><x:element name=\"b\" type=\"x:string\" maxOccurs=\"lots\"/></x:sequence></x:complexType>$post"), "bad_occurs", "occurs")
+    // A type that holds itself, optionally, is fine: a class with a field of its own type.
+    expectEqual(failure("$pre<x:complexType name=\"A\"><x:sequence><x:element name=\"b\" type=\"t:A\" minOccurs=\"0\"/></x:sequence></x:complexType>$post"), "", "recursion")
+    return
+}
+
+fun main: int {
+    case0()
+    case1()
+    case2()
+    case3()
+    case4()
+    case5()
+    case6()
+    testsPassed()
+}

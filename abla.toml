@@ -1,0 +1,14 @@
+name = "abla-soap"
+version = "0.1.0"
+entry = "src/soap.ab"
+visibility = "imports"
+
+# What `import github("AndreBaltazar8/abla-soap/...")` can name. `tls` is apart so that only programs asking for it link OpenSSL.
+[exports]
+"envelope" = "src/envelope.ab"
+"client" = "src/client.ab"
+"decode" = "src/decode.ab"
+"wssecurity" = "src/wssecurity.ab"
+"wsdl" = "src/wsdl.ab"
+"generate" = "src/generate.ab"
+"tls" = "src/tls.ab"
