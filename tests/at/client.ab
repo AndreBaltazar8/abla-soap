@@ -1,10 +1,12 @@
 // AT's series and transport services against tests/at/stand_in.ab: clients generated from AT's WSDLs, mutual TLS and AT's token.
 import "../../build/gen/at_series.ab"
 import "../../build/gen/at_transporte.ab"
+import "../../build/gen/at_fatshare.ab"
 import "../../src/tls.ab"
 import "abla/fs"
 import "abla/test"
 import "abla/process"
+import "abla/json"
 
 fun token(password: string, directory: string): array<SoapHeaderSource> {
     val headers: array<SoapHeaderSource> = []
@@ -58,6 +60,55 @@ fun main: int {
         expect(call.ok(), "a transport document: ${call.problem()}")
         val v = call.value
         expectEqual(if (v != null) v.responseStatus[0].returnCode else "", "0", "the return code")
+    }
+    // The query WSDL is separate from submission's Fatcorews. Its children are
+    // qualified, CustomerTaxID selects the acquirer, and amounts remain text.
+    val invoicesSoap = tlsClient("$url/fatshare/ws/fatshareFaturas", directory)
+    if (invoicesSoap != null) {
+        Path("$directory/efatura.json").writeText(jsonStringify($json {"invoices": [
+            {"buyerTaxId": "599999993", "supplierTaxId": "232013969", "number": "FT TEST/1", "atcud": "AT-1", "date": "2025-11-01", "net": "100.00", "tax": "23.00", "total": "123.00"},
+            {"buyerTaxId": "599999993", "supplierTaxId": "232013969", "number": "FT TEST/2", "atcud": "AT-2", "date": "2025-11-02", "net": "100.00", "tax": "23.00", "total": "123.00"},
+            {"buyerTaxId": "599999993", "supplierTaxId": "232013969", "number": "FT TEST/3", "atcud": "AT-3", "date": "2025-11-03", "net": "100.00", "tax": "23.00", "total": "123.00"}
+        ]}))
+        val invoices = AtInvoicesFatshareInvoicesPortSoap11Client(invoicesSoap)
+        val first = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "599999993", startDate = "2025-11-01", endDate = "2025-11-30", pagination = AtInvoicesPaginationType("1", "2")))
+        expect(first.ok(), "query: ${first.problem()}")
+        val a = first.value
+        if (a != null) {
+            expectEqual(a.estadoExecucao.estadoOperacao, 200, "query's success code is 200")
+            val list = a.invoicesList
+            expect(list != null, "a page")
+            if (list != null) {
+                expectEqual(list.invoice.size, 2, "first page has two invoices")
+                expectEqual(list.invoice[0].grossTotal, "123.00", "amounts decode without a float")
+                expectEqual(list.invoice[0].taxRegistrationNumber ?? "", "232013969", "the supplier")
+                expectEqual(list.paginationTotal.totalDocs, 3, "total documents")
+                expectEqual(list.paginationTotal.totalDocsSent, 2, "documents on this page")
+                expectEqual(list.paginationTotal.totalPages, 2, "total pages")
+            }
+        }
+        val secondPage = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "599999993", startDate = "2025-11-01", endDate = "2025-11-30", pagination = AtInvoicesPaginationType("2", "2")))
+        expect(secondPage.ok(), "second page")
+        val b = secondPage.value
+        if (b != null && b.invoicesList != null) {
+            val list = b.invoicesList
+            if (list != null) {
+                expectEqual(list.invoice.size, 1, "last page has one invoice")
+                expectEqual(list.invoice[0].invoiceNo, "FT TEST/3", "no first-page repeat")
+            }
+        }
+        for (case in [["0", "2", "440"], ["3", "2", "444"], ["1", "0", "450"], ["1", "5001", "454"]]) {
+            val call = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "599999993", startDate = "2025-11-01", endDate = "2025-11-30", pagination = AtInvoicesPaginationType(case[0], case[1])))
+            expect(call.ok(), "AT refusal is a decoded response")
+            val value = call.value
+            expectEqual(if (value != null) "${value.estadoExecucao.estadoOperacao}" else "", case[2], "the manual's pagination code")
+        }
+        val mismatch = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "232013969", startDate = "2025-11-01", endDate = "2025-11-30"))
+        val m = mismatch.value
+        expectEqual(if (m != null) m.estadoExecucao.estadoOperacao else 0, 414, "a different taxpayer isn't queried")
+        val empty = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "599999993", startDate = "2025-12-01", endDate = "2025-12-31"))
+        val e = empty.value
+        expect(e != null && e.invoicesList == null, "an empty result omits the list as the WSDL allows")
     }
     // The same identity from a PKCS#12 container, as AT's manual has it.
     val pfx = soapMutualTlsClientPkcs12("$url/SeriesWSService", Path("$directory/client.pfx").readText(), "pfx-pass",

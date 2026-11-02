@@ -21,7 +21,7 @@ package=$work/package
 mkdir "$package"
 cp -r "$root/abla.toml" "$root/src" "$package/"
 mkdir -p "$package/tests/at"
-cp "$root/tests/at/stand_in.ab" "$package/tests/at/"
+cp "$root/tests/at/stand_in.ab" "$root/tests/at/invoices.ab" "$package/tests/at/"
 git -C "$package" init --quiet --initial-branch=main
 git -C "$package" add -A
 git -C "$package" -c user.name=t -c user.email=t@example.invalid commit --quiet -m c

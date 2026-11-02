@@ -10,6 +10,7 @@ import "abla/fs"
 import "abla/json"
 import "abla/crypto"
 import "abla/text"
+import "invoices.ab"
 
 var folder = Path("")
 var library = false
@@ -208,7 +209,8 @@ fun respond(body: string, path: string): Answer {
     val soapBody = doc.root.child("Body", soap)
     if (soapBody == null || soapBody.elements().size == 0) return fault("no body")
     val request = soapBody.elements()[0]
-    if (path == "/documentosTransporte") transport(request, username) else handle(request, username)
+    if (path == "/fatshare/ws/fatshareFaturas") invoiceQuery(request, username)
+    else if (path == "/documentosTransporte") transport(request, username) else handle(request, username)
 }
 // The hosted listener exposes its OpenSSL context; require a certificate under this fixture's CA at the TLS boundary.
 trusted fun requireClient(listener: TlsListener): bool {
@@ -269,7 +271,7 @@ fun serve(): int {
         val reply = if (path == "/stop") Answer(200, "")
             else if (!contentType.contains("text/xml") || !action) fault("SOAP 1.1's headers are missing", 400)
             else if (library && !clientSubject(connection)) fault("whose certificate is this?", 403)
-            else if (path != "/SeriesWSService" && path != "/documentosTransporte") fault("nothing at $path", 404)
+            else if (path != "/SeriesWSService" && path != "/documentosTransporte" && path != "/fatshare/ws/fatshareFaturas") fault("nothing at $path", 404)
             else respond(body, path)
         if (reply.status != 0) connection.write("HTTP/1.1 ${reply.status} Answer\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: ${reply.text.size}\r\nConnection: close\r\n\r\n${reply.text}")
         connection.close()

@@ -1,0 +1,85 @@
+// AT's fatshareInvoices.wsdl and e-Fatura specific manual 2.1.10 (2026-11-02).
+// All children are qualified. This fixture returns header amounts, never a PDF.
+// Optional FOLDER/efatura.json supplies synthetic invoices and one-shot fault modes.
+import github("AndreBaltazar8/abla-xml")
+import "abla/json"
+import "abla/fs"
+import "abla/process"
+import "stand_in.ab"
+
+val invoiceNamespace = "http://factemi.at.min_financas.pt/fatshareInvoices"
+
+fun invoiceAnswer(code: int, message: string, entries: string = ""): Answer =
+    Answer(200, envelope("<InvoicesResponse xmlns=\"$invoiceNamespace\">$entries<estadoExecucao><EstadoOperacao>$code</EstadoOperacao><Desc>${escaped(message)}</Desc></estadoExecucao></InvoicesResponse>"))
+fun invoiceNif(nif: string): bool {
+    if (nif.size != 9) return false
+    var sum = 0
+    for (i in 0..8) {
+        if (nif[i] < 48 || nif[i] > 57) return false
+        if (i < 8) sum = sum + (nif[i] - 48) * (9 - i)
+    }
+    val digit = 11 - sum % 11
+    nif[8] - 48 == (if (digit >= 10) 0 else digit)
+}
+fun invoiceXml(row: Json): string {
+    val number = escaped(row.getString("number"))
+    val date = escaped(row.getString("date"))
+    val kind = if (row.getString("kind") == "") "FT" else escaped(row.getString("kind"))
+    val net = escaped(row.getString("net"))
+    val tax = escaped(row.getString("tax"))
+    val gross = escaped(row.getString("total"))
+    "<Invoice><InvoiceNo>$number</InvoiceNo><ATCUD>${escaped(row.getString("atcud"))}</ATCUD><InvoiceDate>$date</InvoiceDate><InvoiceType>$kind</InvoiceType><SelfBillingIndicator>0</SelfBillingIndicator><TaxRegistrationNumber>${escaped(row.getString("supplierTaxId"))}</TaxRegistrationNumber><CashVATSchemeIndicator>0</CashVATSchemeIndicator><LineSummary><TaxPointDate>$date</TaxPointDate><DebitCreditIndicator>${if (kind == "NC") "D" else "C"}</DebitCreditIndicator><TaxAmount>$tax</TaxAmount><NetAmount>$net</NetAmount><GrossAmount>$gross</GrossAmount><TotalTaxBase>0.00</TotalTaxBase><Tax><TaxType>IVA</TaxType><TaxCountryRegion>PT</TaxCountryRegion><TaxCode>NOR</TaxCode><TaxPercentage>23.00</TaxPercentage></Tax><TaxExemptionCode></TaxExemptionCode></LineSummary><TaxPayable>$tax</TaxPayable><NetTotal>$net</NetTotal><GrossTotal>$gross</GrossTotal></Invoice>"
+}
+fun invoiceQuery(request: XmlElement, username: string): Answer {
+    if (request.localName != "InvoicesRequest" || request.namespaceUri != invoiceNamespace) return fault("InvoicesRequest and its children must be qualified")
+    val asked = flat(request)
+    logged($json {"operation": "InvoicesRequest", "username": username, "fields": asked})
+    val buyer = request.childText("CustomerTaxID", invoiceNamespace)
+    val issuer = request.childText("TaxRegistrationNumber", invoiceNamespace)
+    if (buyer == "" && issuer == "") return invoiceAnswer(310, "Não foi indicado nenhum NIF.")
+    if (buyer != "" && issuer != "") return fault("TaxRegistrationNumber and CustomerTaxID are a choice")
+    val nif = if (buyer != "") buyer else issuer
+    if (nif.size != 9) return invoiceAnswer(410, "O NIF indicado não possui 9 dígitos.")
+    if (!invoiceNif(nif)) return invoiceAnswer(412, "O NIF indicado é inválido.")
+    if (nif != username.split("/")[0]) return invoiceAnswer(414, "O NIF indicado não corresponde ao de login.")
+    val from = request.childText("StartDate", invoiceNamespace)
+    val to = request.childText("EndDate", invoiceNamespace)
+    if (from == "") return invoiceAnswer(320, "A data início não foi preenchida.")
+    if (to == "") return invoiceAnswer(330, "A data fim não foi preenchida.")
+    if (from.size != 10 || to.size != 10 || seconds("${from}T00:00:00") == 0 || seconds("${to}T00:00:00") == 0) return fault("dates must be YYYY-MM-DD")
+    if (from > now().slice(0, 10)) return invoiceAnswer(424, "A data início é futura.")
+    if (to < from) return invoiceAnswer(432, "A data fim é inferior à data início.")
+    val months = (toInt(to.slice(0, 4)) - toInt(from.slice(0, 4))) * 12 + toInt(to.slice(5, 7)) - toInt(from.slice(5, 7))
+    if (months > 1 || (months == 1 && to.slice(8, 10) >= from.slice(8, 10))) return invoiceAnswer(434, "Período indicado superior a um mês.")
+    val pagination = request.child("Pagination", invoiceNamespace)
+    val page = if (pagination != null) toInt(pagination.childText("nPage", invoiceNamespace)) else 1
+    val size = if (pagination != null) toInt(pagination.childText("nDocsPage", invoiceNamespace)) else 300
+    if (page < 1) return invoiceAnswer(440, "O número da página é inferior a 1.")
+    if (size < 1) return invoiceAnswer(450, "O número de documentos por página é inferior a 1.")
+    if (size > 5000) return invoiceAnswer(454, "O número de documentos por página é maior que o limite de 5000.")
+    val file = folder.child("efatura.json")
+    val parsed = jsonParse(if (file.exists()) file.readText() else "{}")
+    val config = parsed.value
+    if (config.getInt("minYear") > toInt(from.slice(0, 4))) return invoiceAnswer(422, "Ano não disponível para consulta.")
+    val mode = if (config.getInt("onPage") == 0 || config.getInt("onPage") == page) config.getString("mode") else ""
+    if (mode == "dropOnce" || mode == "delayOnce") file.writeText(jsonStringify(with(config, ["mode"], [""])))
+    if (mode == "dropOnce") return Answer(0, "")
+    if (mode == "delayOnce") sleep(6000)
+    if (mode == "fault") return fault(config.getString("message"))
+    if (mode == "refuse") return invoiceAnswer(config.getInt("code"), config.getString("message"))
+    val rows: array<Json> = []
+    for (row in config.get("invoices").values) {
+        if ((if (buyer != "") row.getString("buyerTaxId") == buyer else row.getString("supplierTaxId") == issuer) && row.getString("date") >= from && row.getString("date") <= to) rows.append(row)
+    }
+    val pages = (rows.size + size - 1) / size
+    if (page > (if (pages == 0) 1 else pages)) return invoiceAnswer(444, "O número da página é maior que o número total de páginas.")
+    if (rows.size == 0) return invoiceAnswer(200, "Operação efetuada com sucesso.")
+    var entries = ""
+    val first = (page - 1) * size
+    val last = if (first + size < rows.size) first + size else rows.size
+    var i = first
+    while (i < last) { entries = entries + invoiceXml(rows[i]); i = i + 1 }
+    val statedPage = if (mode == "badPage") page + 1 else page
+    val count = if (mode == "changedTotal") rows.size + 1 else rows.size
+    invoiceAnswer(200, "Operação efetuada com sucesso.", "<InvoicesList>$entries<PaginationTotal><totalDocs>$count</totalDocs><totalDocsSent>${last - first}</totalDocsSent><totalPages>$pages</totalPages><nPage>$statedPage</nPage></PaginationTotal></InvoicesList>")
+}

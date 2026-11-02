@@ -11,7 +11,7 @@ tools/fetch-wsdls.sh
 
 mk=build/wsdl2abla
 [[ -x $mk ]] || "$compiler" build tools/wsdl2abla.ab -o "$mk"
-for pair in series:AtSeries transporte:AtTransporte fatcore:AtFatcore vies:Vies; do
+for pair in series:AtSeries transporte:AtTransporte fatcore:AtFatcore fatshare:AtInvoices vies:Vies; do
     name=${pair%:*}
     [[ -f .wsdls/$name.wsdl ]] || continue
     "$mk" ".wsdls/$name.wsdl" --prefix "${pair#*:}" --import '"../../src/soap.ab"' -o "build/gen/at_$name.ab"
