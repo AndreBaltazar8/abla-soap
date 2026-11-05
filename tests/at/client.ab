@@ -35,7 +35,7 @@ fun main: int {
         val v = call.value
         if (v != null) {
             val info = v.registarSerieResp.infoSerie
-            expectEqual(if (info != null) info.codValidacaoSerie else "", "AAJFJ3K5", "the validation code")
+            expectEqual(if (info != null) info.codValidacaoSerie else "", "AAJFJ3K5BC", "the validation code")
             expectEqual(v.registarSerieResp.infoResultOper.codResultOper, 2001, "the result")
         }
         // AT's refusals come in a result, not a fault; they are for the caller to read.
@@ -109,6 +109,7 @@ fun main: int {
         val empty = invoices.invoices(AtInvoicesInvoicesRequest(customerTaxID = "599999993", startDate = "2025-12-01", endDate = "2025-12-31"))
         val e = empty.value
         expect(e != null && e.invoicesList == null, "an empty result omits the list as the WSDL allows")
+        if (e != null) expectEqual(e.estadoExecucao.estadoOperacao, 486, "the observed empty-list code")
     }
     // The same identity from a PKCS#12 container, as AT's manual has it.
     val pfx = soapMutualTlsClientPkcs12("$url/SeriesWSService", Path("$directory/client.pfx").readText(), "pfx-pass",

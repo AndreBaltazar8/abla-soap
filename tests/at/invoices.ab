@@ -73,7 +73,10 @@ fun invoiceQuery(request: XmlElement, username: string): Answer {
     }
     val pages = (rows.size + size - 1) / size
     if (page > (if (pages == 0) 1 else pages)) return invoiceAnswer(444, "O número da página é maior que o número total de páginas.")
-    if (rows.size == 0) return invoiceAnswer(200, "Operação efetuada com sucesso.")
+    if (mode == "emptyWithPagination") return invoiceAnswer(486, "Lista de faturas vazia.", "<InvoicesList><PaginationTotal><totalDocs>1</totalDocs><totalDocsSent>0</totalDocsSent><totalPages>1</totalPages><nPage>1</nPage></PaginationTotal></InvoicesList>")
+    // AT's test service returned 486 and this message for an empty buyer query.
+    if (rows.size == 0) return invoiceAnswer(486, "Lista de faturas vazia.")
+    if (mode == "emptyWithInvoice") return invoiceAnswer(486, "Lista de faturas vazia.", "<InvoicesList>${invoiceXml(rows[0])}<PaginationTotal><totalDocs>1</totalDocs><totalDocsSent>1</totalDocsSent><totalPages>1</totalPages><nPage>1</nPage></PaginationTotal></InvoicesList>")
     var entries = ""
     val first = (page - 1) * size
     val last = if (first + size < rows.size) first + size else rows.size
