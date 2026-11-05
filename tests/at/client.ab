@@ -2,6 +2,7 @@
 import "../../build/gen/at_series.ab"
 import "../../build/gen/at_transporte.ab"
 import "../../build/gen/at_fatshare.ab"
+import "../../build/gen/at_fatcore.ab"
 import "../../src/tls.ab"
 import "abla/fs"
 import "abla/test"
@@ -45,6 +46,37 @@ fun main: int {
         if (r != null) {
             expectEqual(r.registarSerieResp.infoResultOper.codResultOper, 4046, "the code")
             expectEqual(r.registarSerieResp.infoResultOper.msgResultOper, "Tipo inválido", "the message")
+        }
+        val invoiceSoap=tlsClient("$url/fatcorews/ws/",directory)
+        expect(invoiceSoap!=null,"a per-invoice client")
+        if(invoiceSoap!=null) {
+            val day="2025-11-01"
+            val moment="2025-11-01T12:00:00"
+            val number="FT A/1"
+            val atcud="AAJFJ3K5BC-1"
+            val line=AtFatcoreInvoiceDataTypeLineSummary(taxPointDate=day,debitCreditIndicator="C",amount="1.00",tax=AtFatcoreTax(taxType="IVA",taxCountryRegion="PT",taxCode="NOR",taxPercentage="23.00"))
+            val data=AtFatcoreInvoiceDataType(invoiceNo=number,atcud=atcud,invoiceDate=day,invoiceType="FT",selfBillingIndicator="0",customerTaxID="999999990",customerTaxIDCountry="PT",documentStatus=AtFatcoreInvoiceStatus(invoiceStatus="N",invoiceStatusDate=moment),hashCharacters="0",cashVATSchemeIndicator="0",paperLessIndicator="0",systemEntryDate=moment,lineSummary=[line],documentTotals=AtFatcoreDocumentTotals(taxPayable="0.23",netTotal="1.00",grossTotal="1.23"))
+            val invoices=AtFatcoreFatcorewsPortSoap11Client(invoiceSoap)
+            val created=invoices.registerInvoice(AtFatcoreRegisterInvoiceRequest(eFaturaMDVersion="0.0.1",auditFileVersion="1.04_01",taxRegistrationNumber="599999993",taxEntity="Global",softwareCertificateNumber="0",invoiceData=data))
+            val createdAnswer=created.value
+            expect(created.ok() && createdAnswer!=null && createdAnswer.response.codigoResposta==0,"a synthetic FT is registered against the active series and ATCUD")
+            val duplicate=invoices.registerInvoice(AtFatcoreRegisterInvoiceRequest(eFaturaMDVersion="0.0.1",auditFileVersion="1.04_01",taxRegistrationNumber="599999993",taxEntity="Global",softwareCertificateNumber="0",invoiceData=data))
+            val duplicateAnswer=duplicate.value
+            expect(duplicate.ok() && duplicateAnswer!=null && duplicateAnswer.response.codigoResposta== -10,"a duplicate synthetic FT is refused")
+            val header=AtFatcoreInvoiceHeaderType(invoiceNo=number,atcud=atcud,invoiceDate=day,invoiceType="FT",selfBillingIndicator="0",customerTaxID="999999990",customerTaxIDCountry="PT")
+            val wrongHeader=AtFatcoreInvoiceHeaderType(invoiceNo=number,atcud=atcud,invoiceDate=day,invoiceType="FT",selfBillingIndicator="0",customerTaxID="999999999",customerTaxIDCountry="PT")
+            val wrongStatus=invoices.changeInvoiceStatus(AtFatcoreChangeInvoiceStatusRequest(eFaturaMDVersion="0.0.1",taxRegistrationNumber="599999993",invoiceHeader=wrongHeader,invoiceStatus=AtFatcoreNewInvoiceStatusType(invoiceStatus="A",invoiceStatusDate=moment)))
+            val wrongStatusAnswer=wrongStatus.value
+            expect(wrongStatus.ok() && wrongStatusAnswer!=null && wrongStatusAnswer.response.codigoResposta== -1,"a mismatched invoice header is refused")
+            val changed=invoices.changeInvoiceStatus(AtFatcoreChangeInvoiceStatusRequest(eFaturaMDVersion="0.0.1",taxRegistrationNumber="599999993",invoiceHeader=header,invoiceStatus=AtFatcoreNewInvoiceStatusType(invoiceStatus="A",invoiceStatusDate=moment)))
+            val changedAnswer=changed.value
+            expect(changed.ok() && changedAnswer!=null && changedAnswer.response.codigoResposta==0,"the synthetic FT can be annulled")
+            val cancelled=series.anularSerie(AtSeriesAnularSerie(serie="A",classeDoc="SI",tipoDoc="FT",codValidacaoSerie="AAJFJ3K5BC",motivo="ER",declaracaoNaoEmissao=true))
+            val cancelledAnswer=cancelled.value
+            expect(cancelled.ok() && cancelledAnswer!=null && cancelledAnswer.anularSerieResp.infoResultOper.codResultOper==4004,"a used series cannot be declared unused")
+            val finalized=series.finalizarSerie(AtSeriesFinalizarSerie(serie="A",classeDoc="SI",tipoDoc="FT",codValidacaoSerie="AAJFJ3K5BC",seqUltimoDocEmitido="1"))
+            val finalizedAnswer=finalized.value
+            expect(finalized.ok() && finalizedAnswer!=null && finalizedAnswer.finalizarSerieResp.infoResultOper.codResultOper==2004,"a used series can be finalized with its last number")
         }
     }
     val second = tlsClient("$url/documentosTransporte", directory)

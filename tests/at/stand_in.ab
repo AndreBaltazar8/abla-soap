@@ -16,6 +16,7 @@ var folder = Path("")
 var library = false
 val series: Map<string, Json> = Map()
 val documents: Map<string, string> = Map()
+val commercialInvoices: Map<string, Json> = Map()
 val sec = "http://schemas.xmlsoap.org/ws/2002/12/secext"
 val soap = "http://schemas.xmlsoap.org/soap/envelope/"
 class Answer(val status: int, val text: string)
@@ -113,6 +114,7 @@ fun handle(request: XmlElement, username: string): Answer {
             if (request.child("serie", "") == null || field(asked, "numCertSWFatur") != "9999") return fault("unqualified children, as the schema says")
             if (kind == "XX") return answer(operation, 4046, "Tipo inválido")
             val fixed = with(asked, ["codValidacaoSerie", "dataRegisto", "estado", "dataEstado", "nifComunicou"], ["AAJFJ3K5BC", "2026-11-02", "A", "2026-11-02T10:00:00", "599999993"])
+            series.set(key, fixed)
             return answer(operation, 2001, "Registada", info(fixed))
         }
         if (name.startsWith("DUP") || series.has(key)) return answer(operation, 4001, "Não foi possível registar a Série. A Série $name indicada para o tipo de documento $kind já foi registada.")
@@ -143,12 +145,56 @@ fun handle(request: XmlElement, username: string): Answer {
     }
     if (operation == "anularSerie") {
         if (field(asked, "motivo") != "ER") return answer(operation, 4051, "O valor indicado no motivo de anulação deve corresponder a um valor pré-definido.")
-        if (entry.isNull() || field(entry, "estado") != "A" || field(asked, "declaracaoNaoEmissao") != "true") return answer(operation, 4004, "Não foi possível anular a Série. A Série não está ativa.")
+        if (entry.isNull() || field(entry, "estado") != "A" || field(asked, "declaracaoNaoEmissao") != "true" || toInt(field(entry, "seqUltimoDocEmitido")) > 0) return answer(operation, 4004, "Não foi possível anular a Série. A Série não está ativa ou já foi usada.")
         val updated = with(entry, ["estado", "dataEstado"], ["N", moment])
         series.set(key, updated)
         return answer(operation, 2003, "Série anulada com sucesso.", info(updated))
     }
     fault("what's $operation?")
+}
+val fatcoreNamespace = "http://factemi.at.min_financas.pt/documents"
+fun fatcoreAnswer(operation: string, code: int, message: string): Answer =
+    Answer(200, envelope("<${operation}Response xmlns=\"$fatcoreNamespace\"><Response><CodigoResposta>$code</CodigoResposta><Mensagem>${escaped(message)}</Mensagem><DataOperacao>${now()}</DataOperacao></Response></${operation}Response>"))
+fun fatcore(request: XmlElement, username: string): Answer {
+    if (request.namespaceUri != fatcoreNamespace) return fault("fatcore request namespace")
+    val operation=request.localName
+    val asked=flat(request)
+    logged($json {"operation":operation,"username":username,"fields":asked})
+    val configFile=folder.child("fatcore.json")
+    val config=jsonParse(if(configFile.exists()) configFile.readText() else "{}").value
+    if ((operation=="RegisterInvoiceRequest" && config.getString("mode")=="faultRegister") || (operation=="ChangeInvoiceStatusRequest" && config.getString("mode")=="faultStatus")) return fault(if(config.getString("message")!="") config.getString("message") else "Synthetic authentication refusal")
+    if (field(asked,"TaxRegistrationNumber") != username.split("/")[0]) return fatcoreAnswer(operation.replace("Request",""),-16,"NIF do emitente não corresponde ao subutilizador.")
+    if (operation=="RegisterInvoiceRequest") {
+        val invoice=asked.get("InvoiceData")
+        val number=field(invoice,"InvoiceNo")
+        val pieces=number.split(" ")
+        if (pieces.size!=2 || pieces[0]!="FT") return fatcoreAnswer("RegisterInvoice",-1,"Documento inválido.")
+        val identifier=pieces[1].split("/")
+        if (identifier.size!=2 || identifier[1]!="1") return fatcoreAnswer("RegisterInvoice",-1,"Número inválido.")
+        val key="${identifier[0].uppercase()}/SI/FT"
+        val entry=series.get(key) ?? jsonNull()
+        if (entry.isNull() || field(entry,"estado")!="A" || field(invoice,"ATCUD")!="${field(entry,"codValidacaoSerie")}-1") return fatcoreAnswer("RegisterInvoice",-1,"Série ou ATCUD inválido.")
+        if (commercialInvoices.has(number)) return fatcoreAnswer("RegisterInvoice",-10,"O documento já foi registado.")
+        val status=invoice.get("DocumentStatus")
+        val totals=invoice.get("DocumentTotals")
+        val line=invoice.get("LineSummary")
+        val tax=line.get("Tax")
+        if (field(asked,"eFaturaMDVersion")!="0.0.1" || field(asked,"AuditFileVersion")!="1.04_01" || field(asked,"TaxEntity")!="Global" || field(asked,"SoftwareCertificateNumber")!="0" || field(invoice,"InvoiceType")!="FT" || field(status,"InvoiceStatus")!="N" || field(invoice,"CustomerTaxID")!="999999990" || field(invoice,"CustomerTaxIDCountry")!="PT" || field(invoice,"HashCharacters")!="0" || field(line,"Amount")!="1.00" || field(line,"DebitCreditIndicator")!="C" || field(tax,"TaxType")!="IVA" || field(tax,"TaxCountryRegion")!="PT" || field(tax,"TaxCode")!="NOR" || field(tax,"TaxPercentage")!="23.00" || field(totals,"NetTotal")!="1.00" || field(totals,"TaxPayable")!="0.23" || field(totals,"GrossTotal")!="1.23") return fatcoreAnswer("RegisterInvoice",-1,"Dados sintéticos inválidos.")
+        commercialInvoices.set(number,invoice)
+        series.set(key,with(entry,["seqUltimoDocEmitido"],["1"]))
+        return fatcoreAnswer("RegisterInvoice",0,"Operação efetuada com sucesso.")
+    }
+    if (operation=="ChangeInvoiceStatusRequest") {
+        val header=asked.get("InvoiceHeader")
+        val number=field(header,"InvoiceNo")
+        val saved=commercialInvoices.get(number) ?? jsonNull()
+        if (saved.isNull() || field(header,"ATCUD")!=field(saved,"ATCUD") || field(asked.get("InvoiceStatus"),"InvoiceStatus")!="A") return fatcoreAnswer("ChangeInvoiceStatus",-1,"Documento inválido.")
+        for (name in ["InvoiceDate","InvoiceType","SelfBillingIndicator","CustomerTaxID","CustomerTaxIDCountry"]) if(field(header,name)!=field(saved,name)) return fatcoreAnswer("ChangeInvoiceStatus",-1,"Cabeçalho não corresponde ao documento.")
+        if(field(saved,"testStatus")=="A") return fatcoreAnswer("ChangeInvoiceStatus",-2,"Documento já anulado.")
+        commercialInvoices.set(number,with(saved,["testStatus"],["A"]))
+        return fatcoreAnswer("ChangeInvoiceStatus",0,"Operação efetuada com sucesso.")
+    }
+    fault("unsupported fatcore operation")
 }
 fun transportReply(number: string, code: string, message: string, atCode: string = ""): Answer {
     val extra = if (code == "0" || code == "-100") "<DocumentNumber>${escaped(number)}</DocumentNumber><ATDocCodeID>$atCode</ATDocCodeID>" else ""
@@ -209,7 +255,8 @@ fun respond(body: string, path: string): Answer {
     val soapBody = doc.root.child("Body", soap)
     if (soapBody == null || soapBody.elements().size == 0) return fault("no body")
     val request = soapBody.elements()[0]
-    if (path == "/fatshare/ws/fatshareFaturas") invoiceQuery(request, username)
+    if (path == "/fatcorews/ws/") fatcore(request, username)
+    else if (path == "/fatshare/ws/fatshareFaturas") invoiceQuery(request, username)
     else if (path == "/documentosTransporte") transport(request, username) else handle(request, username)
 }
 // The hosted listener exposes its OpenSSL context; require a certificate under this fixture's CA at the TLS boundary.
@@ -271,7 +318,7 @@ fun serve(): int {
         val reply = if (path == "/stop") Answer(200, "")
             else if (!contentType.contains("text/xml") || !action) fault("SOAP 1.1's headers are missing", 400)
             else if (library && !clientSubject(connection)) fault("whose certificate is this?", 403)
-            else if (path != "/SeriesWSService" && path != "/documentosTransporte" && path != "/fatshare/ws/fatshareFaturas") fault("nothing at $path", 404)
+            else if (path != "/SeriesWSService" && path != "/documentosTransporte" && path != "/fatshare/ws/fatshareFaturas" && path != "/fatcorews/ws/") fault("nothing at $path", 404)
             else respond(body, path)
         if (reply.status != 0) connection.write("HTTP/1.1 ${reply.status} Answer\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: ${reply.text.size}\r\nConnection: close\r\n\r\n${reply.text}")
         connection.close()
