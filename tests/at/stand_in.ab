@@ -2,9 +2,8 @@
 // FOLDER PORT [soap]: PORT=0 chooses a free port; writes FOLDER/port and FOLDER/ready. `soap` keeps the library's
 // strict generated-client fixture (username, certificate subject, schema and fixed answers). Otherwise models series and transport.
 import github("AndreBaltazar8/abla-xml")
-import "abla/unsafe/memory"
-import "abla/unsafe/memory/raw"
-import "abla/tls/hosted"
+import "abla/tls/pure"
+import "abla/crypto/x509"
 import "abla/process"
 import "abla/fs"
 import "abla/json"
@@ -259,34 +258,15 @@ fun respond(body: string, path: string): Answer {
     else if (path == "/fatshare/ws/fatshareFaturas") invoiceQuery(request, username)
     else if (path == "/documentosTransporte") transport(request, username) else handle(request, username)
 }
-// The hosted listener exposes its OpenSSL context; require a certificate under this fixture's CA at the TLS boundary.
-trusted fun requireClient(listener: TlsListener): bool {
-    val context = tlsControlPointer(listener.handle, 0)
-    if (SSL_CTX_load_verify_locations(context, folder.child("ca.crt").text, nativeNullPointer()) != 1) return false
-    SSL_CTX_set_verify(context, 3, nativeNullPointer())
-    true
+// The listener asks every client for a certificate under this fixture's CA; the handshake fails without one.
+fun clientSubject(connection: TlsConnection): bool {
+    if (!connection.peerCertificateVerified()) return false
+    val certificate = x509ParseDer(connection.peerCertificate())
+    certificate.ok && certificate.subject.commonName == "abla-soap-client"
 }
-trusted fun clientSubject(connection: TlsConnection): bool {
-    // Read the client certificate common name; the certificate reference is owned here.
-    val cert = SSL_get1_peer_certificate(tlsControlPointer(connection.handle, 8))
-    if (pointerIsNull(cert)) return false
-    val name = X509_get_subject_name(cert)
-    val buffer = nativeByteBuffer(256)
-    val size = X509_NAME_get_text_by_NID(name, 13, buffer.address, 256)
-    var subject = ""
-    if (size > 0) subject = buffer.adoptString(int(size)) else buffer.close()
-    X509_free(cert)
-    subject == "abla-soap-client"
-}
-trusted noescape extern:"c" fun SSL_get1_peer_certificate(ssl: i64*): i64*
-trusted noescape extern:"c" fun X509_get_subject_name(cert: i64*): i64*
-trusted noescape extern:"c" fun X509_NAME_get_text_by_NID(name: i64*, nid: i32, buffer: i64*, size: i32): i32
-trusted noescape extern:"c" fun SSL_CTX_load_verify_locations(context: i64*, file: cstring, directory: i64*): i32
-trusted noescape extern:"c" fun SSL_CTX_set_verify(context: i64*, mode: int, callback: i64*): void
-trusted noescape extern:"c" fun X509_free(cert: i64*): void
 fun serve(): int {
-    val listener = tlsListen(folder.child("server.crt").text, folder.child("server.key").text, "::1", toInt(processArgument(1)))
-    if (listener.handle < 0 || !requireClient(listener)) return 1
+    val listener = tlsListenWithClientCa(folder.child("server.crt").text, folder.child("server.key").text, folder.child("ca.crt").text, "::1", toInt(processArgument(1)))
+    if (listener.handle < 0) return 1
     folder.child("port").writeText("${listener.localPort()}")
     folder.child("ready").writeText("ready")
     var stopping = false

@@ -1,8 +1,6 @@
 ABLAC_DIR ?= $(abspath ../ablac)
 COMPILER ?= ablac
 TESTS := tests/envelope_test.ab tests/client_test.ab tests/wsdl_test.ab tests/generated_test.ab tests/compile-time/generate_test.ab
-# OpenSSL for what links it. On CI it's installed, and this is empty.
-WITH_OPENSSL ?= nix-shell $(ABLAC_DIR)/shell.nix --run
 
 .PHONY: all test generate tool subpaths at clean
 
@@ -26,14 +24,10 @@ generate: tool
 	printf 'import "hostile.ab"\nfun main: int = 0\n' > build/gen/check_hostile.ab
 	$(COMPILER) build build/gen/check_hostile.ab -o build/gen/check_hostile
 
-# AT's published WSDLs and a local mutual-TLS server, which doesn't call AT, and the subpaths, one of which links OpenSSL.
+# AT's published WSDLs and a local mutual-TLS server, which doesn't call AT, and the subpaths.
 at: tool
-ifeq ($(strip $(WITH_OPENSSL)),)
 	tests/at/run.sh $(COMPILER)
 	tests/subpaths.sh $(COMPILER)
-else
-	$(WITH_OPENSSL) 'tests/at/run.sh $(COMPILER) && tests/subpaths.sh $(COMPILER)'
-endif
 
 clean:
 	@if [ -d build ]; then gio trash build; fi

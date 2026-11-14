@@ -45,9 +45,9 @@ for _ in $(seq 100); do [[ -s $work/port ]] && break; sleep 0.1; done
 [[ -s $work/port ]] || { echo "the mock server didn't start" >&2; exit 1; }
 "$work/client" "$work" "$(cat "$work/port")"
 
-# A program using the library without the subpath has no OpenSSL in it; the client above, which asked, does.
+# Nothing here links OpenSSL: the client above, which asked for TLS, and a program without the subpath alike (abla/tls/pure).
 printf 'import "../src/soap.ab"\nimport "abla/http"\nfun main: int {\n    val c = soapClient(httpClient("h", { r: string, m: int, t: int -> HttpTransportResult("", false) }), "/", soap11, [atUsernameToken("a", "b", "c")], true)\n    var o = c.begin()\n    o.body()\n    if (c.send("a", o).ok()) 0 else 1\n}\n' > build/no_tls.ab
 "$compiler" build build/no_tls.ab -o "$work/no_tls"
 if ldd "$work/no_tls" | grep -qE 'libssl|libcrypto'; then echo 'OpenSSL got into a program without the tls subpath' >&2; exit 1; fi
-ldd "$work/client" | grep -q libssl || { echo 'no OpenSSL in the client that asked for it?' >&2; exit 1; }
-echo 'at: passed, and no OpenSSL without the subpath'
+if ldd "$work/client" | grep -qE 'libssl|libcrypto'; then echo 'OpenSSL got into the TLS client' >&2; exit 1; fi
+echo 'at: passed, and no OpenSSL anywhere'

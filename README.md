@@ -15,7 +15,7 @@ entities, and it fetches nothing it isn't told to.
 | `.../wssecurity` | `WsseUsernameToken`, `AtUsernameToken`, `atUsernameToken` |
 | `.../wsdl` | `wsdlParse`: the model |
 | `.../generate` | `wsdlGenerate`, `wsdlGenerateFrom`: Abla source from it |
-| `.../tls` | `soapHttpsClient`, `soapMutualTlsClientPem`, `soapMutualTlsClientPkcs12`. Only a program that imports this links OpenSSL |
+| `.../tls` | `soapHttpsClient`, `soapMutualTlsClientPem`, `soapMutualTlsClientPkcs12`. TLS is abla/tls/pure: no OpenSSL |
 
 ## A typed client
 
@@ -177,7 +177,7 @@ What a WSDL names reaches generated source only as escaped string literals and s
 | | What it does |
 |---|---|
 | `make test` | envelopes, faults, the security profiles, hostile XML, the WSDL model, a generated client byte for byte |
-| `make at` | clients generated from AT's four published WSDLs (and VIES's), fetched by hash and not committed, against `tests/at/stand_in.ab`: mutual TLS, certificates refused, and the token opened by `openssl`, not by this library. A `.pfx` as well as PEM. Also that a program without `tls` has no OpenSSL, and the package subpaths. Never calls AT |
+| `make at` | clients generated from AT's four published WSDLs (and VIES's), fetched by hash and not committed, against `tests/at/stand_in.ab`: mutual TLS, certificates refused, and the token opened by `openssl`, not by this library. A `.pfx` as well as PEM. Also that no program links OpenSSL, and the package subpaths. Never calls AT |
 
 The `testing-at` subpath exposes `atStandInMain()` for downstream integration suites. Its program takes `FOLDER PORT [soap]`, writes `port`, `ready` and redacted `log.jsonl` in the certificate folder, and binds only IPv6 loopback. `PORT=0` chooses a free port. The optional `soap` mode keeps this library's strict client fixture; the default models registration, consultation, finalization, annulment, transport, and a synthetic per-invoice register/status sequence, including refusals, a timeout and a lost reply. The invoice sequence requires an active test series and its matching ATCUD; a series with an issued invoice cannot be annulled as unused. It needs `openssl` and `date` on PATH and never calls AT.
 
