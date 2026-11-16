@@ -4,6 +4,7 @@ import "../src/generate.ab"
 import "abla/fs"
 import "abla/io"
 import "abla/process"
+import "abla/text"
 
 class DirectoryResolver(val directory: string) : WsdlResolver {
     fun read(location: string): string? {
