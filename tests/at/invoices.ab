@@ -6,6 +6,7 @@ import "abla/json"
 import "abla/fs"
 import "abla/process"
 import "stand_in.ab"
+import "abla/text"
 
 val invoiceNamespace = "http://factemi.at.min_financas.pt/fatshareInvoices"
 

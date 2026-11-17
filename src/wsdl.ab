@@ -1,6 +1,7 @@
 // WSDL 1.1 and the XML Schema inside it, read into a model for the generator. A bounded reader: no DOCTYPE, no entity, and
 // nothing fetched. An import is read only through the resolver it's given, and by default there is none.
 import "envelope.ab"
+import "abla/text"
 
 val wsdlNamespace = "http://schemas.xmlsoap.org/wsdl/"
 val wsdl20Namespace = "http://www.w3.org/ns/wsdl"

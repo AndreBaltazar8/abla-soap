@@ -3,6 +3,7 @@
 export import "envelope.ab"
 import "abla/crypto"
 import "abla/bytes"
+import "abla/text"
 
 class SoapDecodeProblem(val path: string, val message: string)
 

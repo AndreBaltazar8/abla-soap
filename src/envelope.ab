@@ -1,5 +1,6 @@
 // SOAP envelopes on abla-xml: writing them in order, and parsing them into headers, a body and a fault.
 export import github("AndreBaltazar8/abla-xml")
+import "abla/text"
 
 val soap11Namespace = "http://schemas.xmlsoap.org/soap/envelope/"
 val soap12Namespace = "http://www.w3.org/2003/05/soap-envelope"

@@ -3,6 +3,7 @@
 export import "wsdl.ab"
 import "envelope.ab"
 import "abla/bytes"
+import "abla/text"
 
 class WsdlGenerateOptions(
     // Before each name this declares, as two services' types may share them.

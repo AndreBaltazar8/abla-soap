@@ -3,6 +3,7 @@ export import "envelope.ab"
 export import "decode.ab"
 export import "wssecurity.ab"
 import "abla/http"
+import "abla/text"
 
 // What a call came to. `ok()`, or a `fault`, or an `error`. A fault's status is usually 500 and may be anything.
 class SoapResponse(
