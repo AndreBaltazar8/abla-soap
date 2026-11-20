@@ -2,9 +2,15 @@ ABLAC_DIR ?= $(abspath ../ablac)
 COMPILER ?= ablac
 TESTS := tests/envelope_test.ab tests/client_test.ab tests/wsdl_test.ab tests/generated_test.ab tests/compile-time/generate_test.ab
 
-.PHONY: all test generate tool subpaths at clean
+.PHONY: all test generate tool subpaths at clean packages-update
 
 all: test at
+
+# The dependencies are the committed abla.lock's (decision #85): `package vendor` puts each at its locked revision
+# under vendor/ (ignored), never moving it. Moving them is a deliberate change: `make packages-update`, then test and
+# commit the new abla.lock.
+packages-update:
+	$(COMPILER) package update --project .
 
 # No OpenSSL needed: nothing here imports the tls subpath. No float in the library either: nothing goes through one.
 test: generate
@@ -14,7 +20,7 @@ test: generate
 
 tool:
 	mkdir -p build/gen
-	$(COMPILER) package update --project . >/dev/null
+	$(COMPILER) package vendor --project . >/dev/null
 	$(COMPILER) build tools/wsdl2abla.ab -o build/wsdl2abla
 
 # The clients the tests use; the hostile one only has to compile.

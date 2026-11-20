@@ -1,4 +1,4 @@
 /build/
 /.abla/
-/abla.lock
 /.wsdls/
+/vendor/
