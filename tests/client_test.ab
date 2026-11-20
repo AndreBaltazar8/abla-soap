@@ -5,7 +5,6 @@ import "abla/text"
 import "abla/crypto"
 import "abla/crypto/aes"
 import "abla/crypto/rsa"
-import "abla/date"
 
 val e11 = "<e:Envelope xmlns:e=\"http://schemas.xmlsoap.org/soap/envelope/\">"
 val e12 = "<e:Envelope xmlns:e=\"http://www.w3.org/2003/05/soap-envelope\">"

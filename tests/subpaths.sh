@@ -9,6 +9,8 @@ mkdir -p "$root/build"
 work=$(mktemp -d "$root/build/subpaths.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 export ABLA_PACKAGE_CACHE=$work/cache GIT_CONFIG_GLOBAL=$work/gitconfig
+# The programs below import a subpath only to see it resolve and build: no W_UNUSED_IMPORT for those imports.
+export ABLA_WARN_UNUSED_IMPORTS=0
 
 fail() { printf 'subpaths: %s\n' "$1" >&2; exit 1; }
 
