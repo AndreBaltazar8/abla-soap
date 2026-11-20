@@ -5,7 +5,6 @@ import "abla/crypto/aes"
 import "abla/crypto/rsa"
 import "abla/date"
 import "abla/process/time"
-import "abla/random"
 
 // One header a client adds to each call. Called afresh for each, so what it writes may change. A problem is returned as
 // text, and the call doesn't happen.
