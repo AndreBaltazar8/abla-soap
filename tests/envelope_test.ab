@@ -139,9 +139,18 @@ fun case5(): void {
     expect(f != null && f.isFrom("Server", soap11Namespace) && f.message == "down <now>", "1.1")
     val w2 = soapWriter(soap12)
     w2.startBody()
-    soapWriteFault(w2, "Receiver", "down")
-    val b = parsed(w2.finish().text).fault
-    expect(b != null && b.isFrom("Receiver", soap12Namespace) && b.message == "down" && b.reasons[0].language == "en", "1.2")
+    val message = "down <now> & retry"
+    val language = "en"
+    soapWriteFault(w2, "Receiver", message, language)
+    val expected = w2.finish()
+    val writer = xmlWriter()
+    writer.declaration()
+    $xmlw(writer) <soapenv:Envelope xmlns:soapenv="http://www.w3.org/2003/05/soap-envelope"><soapenv:Body><soapenv:Fault><soapenv:Code><soapenv:Value>soapenv:Receiver</soapenv:Value></soapenv:Code><soapenv:Reason><soapenv:Text xml:lang={language}>{message}</soapenv:Text></soapenv:Reason></soapenv:Fault></soapenv:Body></soapenv:Envelope>
+    val written = writer.finish()
+    expect(written.succeeded && expected.succeeded, "1.2 envelope writes")
+    expectEqual(written.text, expected.text, "literal envelope keeps SOAP 1.2 wire bytes")
+    val b = parsed(written.text).fault
+    expect(b != null && b.isFrom("Receiver", soap12Namespace) && b.message == message && b.reasons[0].language == language, "1.2")
     return
 }
 
