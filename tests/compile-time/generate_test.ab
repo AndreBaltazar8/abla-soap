@@ -8,10 +8,10 @@ import "abla/test"
 
 #compilerGrant("filesystem.read")
 
-compile fun shopClient(): string = wsdlGenerateFrom(path("tests/fixtures/shop.wsdl").readText(),
+compile fun shopClient(): string = wsdlGenerateFrom(path("../fixtures/shop.wsdl").readText(),
     WsdlGenerateOptions(prefix = "Shop", soapImport = "\"../../src/soap.ab\"", origin = "tests/fixtures/shop.wsdl")).source
 
-compile fun hostileClient(): string = wsdlGenerateFrom(path("tests/fixtures/hostile-names.wsdl").readText(),
+compile fun hostileClient(): string = wsdlGenerateFrom(path("../fixtures/hostile-names.wsdl").readText(),
     WsdlGenerateOptions(soapImport = "\"../../src/soap.ab\"", origin = "tests/fixtures/hostile-names.wsdl")).source
 
 val shop = #shopClient()
