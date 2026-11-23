@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: AndreBaltazar8/setup-abla@b21e1290aa49862e7bf187dc84b6b3511f4b571e # v1.0.0
+      - uses: AndreBaltazar8/setup-abla@f13f659af61ed16f0f2568964ff5b5f3344ec70a # main, signed Abla v0.2.67 support
         with:
-          version: '0.2.59'
+          version: '0.2.67'
       - name: Envelopes, faults, WS-Security, WSDL and generated clients
         run: make test COMPILER=ablac
       - name: AT's WSDLs against a local mutual-TLS server
